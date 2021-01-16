@@ -6,7 +6,7 @@ from enum import Enum
 import copy
 
 DEFAULT_OPTIONS = {
-    'world_shape': (5, 5),
+    'world_shape': [5, 5],
     'n_agents': 3,
     'max_episode_len': 5
 }
@@ -22,10 +22,7 @@ class Action(Enum):
     MOVE_DOWN   = 4
 
 class Agent():
-    def __init__(self,
-                 index,
-                 world_shape,
-                 random_state):
+    def __init__(self, index, world_shape, random_state):
         self.random_state = random_state
         self.index = index
         self.world_shape = world_shape
@@ -65,7 +62,7 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
             'agents': spaces.Tuple((
                 spaces.Box(low=0, high=max(self.cfg['world_shape']), shape=(4,)),
             )*self.cfg['n_agents']),
-            'state': spaces.Box(low=0, high=1, shape=self.cfg['world_shape']+(2,)),
+            'state': spaces.Box(low=0, high=1, shape=self.cfg['world_shape']+[2]),
         })
         self.action_space = spaces.Tuple((spaces.Discrete(5),)*self.cfg['n_agents'])
 
@@ -79,7 +76,6 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
 
     def reset(self):
         self.goal_poses = [agent.reset() for agent in self.agents]
-        self.random_state.shuffle(self.goal_poses)
         self.timestep = 0
         return self.step([Action.NOP]*self.cfg['n_agents'])[0]
 
@@ -89,20 +85,20 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
         observations = [agent.step(action) for agent, action in zip(self.agents, actions)]
 
         rewards = {}
-        for i, agent in enumerate(self.agents):
+        # shift each agent's goal so that the shared NN has to be used to solve the problem
+        shift = 1
+        shifted_poses = self.goal_poses[shift:]+self.goal_poses[:shift]
+        for i, (agent, goal) in enumerate(zip(self.agents, shifted_poses)):
             rewards[i] = -1 if not agent.reached_goal else 0
-            for j, goal in enumerate(self.goal_poses):
-                if not agent.reached_goal and np.all(agent.pose == goal):
-                    rewards[i] = 10
-                    self.goal_poses.pop(j)
-                    agent.reached_goal = True
-                    break
+            if not agent.reached_goal and np.all(agent.pose == goal):
+                rewards[i] = 1
+                agent.reached_goal = True
 
         all_reached_goal = all([agent.reached_goal for agent in self.agents])
         max_timestep_reached = self.timestep == self.cfg['max_episode_len']
         done = all_reached_goal or max_timestep_reached
 
-        global_state = np.zeros(self.cfg['world_shape'] + (2,), dtype=np.uint8)
+        global_state = np.zeros(self.cfg['world_shape'] + [2], dtype=np.uint8)
         for agent in self.agents:
             global_state[agent.pose[Y], agent.pose[X], 0] = 1
             global_state[agent.goal[Y], agent.goal[X], 1] = 1
@@ -133,13 +129,3 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
         r += top_bot_margin
         print(r)
 
-'''
-env = MultiAgentEnv({})
-print(env.reset())
-for i in range(10):
-    o, r, d, info = env.step([4]*3)
-    env.render()
-    print(info)
-    print(env.agents[2].reached_goal)
-    print("+"*20)
-'''

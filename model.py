@@ -5,15 +5,10 @@ from ray.rllib.models.torch.misc import normc_initializer, same_padding, SlimCon
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils import try_import_torch
 
-from adversarial_comms.models.gnn import adversarialGraphML as gml_adv
-from adversarial_comms.models.gnn import graphML as gml
-from adversarial_comms.models.gnn import graphTools
-
 import numpy as np
 import copy
 
 torch, nn = try_import_torch()
-from torchsummary import summary
 
 # https://ray.readthedocs.io/en/latest/using-ray-with-pytorch.html
 
@@ -53,19 +48,6 @@ class Model(TorchModelV2, nn.Module):
             nn.ReLU()
         )
 
-        self.GFL = nn.Sequential(
-            gml_adv.GraphFilterBatchGSOA(
-                self.cfg['encoder_out_features'],
-                self.cfg['shared_nn_out_features_per_agent'],
-                2, # K
-                0, # split
-                1, # edge features
-                False,
-                forward_mode="default"
-            ),
-            nn.ReLU()
-        )
-
         post_logits = [
             nn.Linear(self.cfg['shared_nn_out_features_per_agent'], 32),
             nn.ReLU(),
@@ -74,8 +56,6 @@ class Model(TorchModelV2, nn.Module):
         nn.init.xavier_uniform_(post_logits[-1].weight)
         nn.init.constant_(post_logits[-1].bias, 0)
         self.action_output = nn.Sequential(*post_logits)
-
-        summary(self.action_output, device="cpu", input_size=(self.cfg['shared_nn_out_features_per_agent'],))
 
         #############
         self.value_encoder = nn.Sequential(
@@ -91,8 +71,6 @@ class Model(TorchModelV2, nn.Module):
             SlimConv2d(8, self.cfg['value_state_encoder_cnn_out_features'], 3, 2, 1),
             nn.Flatten(1, -1)
         )
-
-        #summary(self.value_encoder_state, device="cpu", input_size=(state_shape[2],) + state_shape[:2])
 
         self.value_shared = nn.Sequential(
             nn.Linear(self.cfg['encoder_out_features']*self.n_agents + self.cfg['value_state_encoder_cnn_out_features'], 64),
@@ -114,7 +92,6 @@ class Model(TorchModelV2, nn.Module):
     def forward(self, input_dict, state, seq_lens):
         batch_size = input_dict["obs"]['state'].shape[0]
         device = input_dict["obs"]['state'].device
-        self.GFL[0].addGSO(torch.ones(batch_size, self.n_agents, self.n_agents).to(device))
 
         action_feature_map = torch.zeros(batch_size, self.n_agents, self.cfg['encoder_out_features']).to(device)
         value_feature_map = torch.zeros(batch_size, self.n_agents, self.cfg['encoder_out_features']).to(device)
@@ -125,13 +102,12 @@ class Model(TorchModelV2, nn.Module):
         value_state_features = self.value_encoder_state(input_dict["obs"]['state'].permute(0, 3, 1, 2))
 
         if self.cfg['share_observations']:
-            action_shared_features = self.GFL(action_feature_map.permute(0, 2, 1)).permute(0, 2, 1)
             # We have a big common shared center NN so that all agents have access to the encoded observations of all agents
-            #action_shared_features = self.action_shared(
-            #    action_feature_map.view(
-            #        batch_size, self.n_agents*self.cfg['encoder_out_features']
-            #    )
-            #).view(batch_size, self.n_agents, self.cfg['shared_nn_out_features_per_agent'])
+            action_shared_features = self.action_shared(
+                action_feature_map.view(
+                    batch_size, self.n_agents*self.cfg['encoder_out_features']
+                )
+            ).view(batch_size, self.n_agents, self.cfg['shared_nn_out_features_per_agent'])
         else:
             # Each agent only has access to its own local observation
             action_shared_features = torch.empty(batch_size, self.n_agents, self.cfg['shared_nn_out_features_per_agent']).to(device)
@@ -149,7 +125,6 @@ class Model(TorchModelV2, nn.Module):
         values = torch.empty(batch_size, self.n_agents).to(device)
 
         for i in range(self.n_agents):
-            #import pdb; pdb.set_trace()
             outputs[:, i] = self.action_output(action_shared_features[:, i])
             values[:, i] = self.value_output(value_shared_features[:, i]).squeeze(1)
 

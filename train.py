@@ -1,4 +1,3 @@
-from environment import DemoMultiAgentEnv
 import time
 import numpy as np
 import yaml
@@ -9,6 +8,7 @@ from ray.tune.registry import register_env
 from ray.tune.logger import pretty_print, DEFAULT_LOGGERS, TBXLogger
 from ray.tune.integration.wandb import WandbLogger
 
+from environment import DemoMultiAgentEnv
 from model import Model
 from ray.rllib.models import ModelCatalog
 from multi_trainer import MultiPPOTrainer
@@ -53,7 +53,7 @@ if __name__ == '__main__':
                     "encoder_out_features": 8,
                     "shared_nn_out_features_per_agent": 8,
                     "value_state_encoder_cnn_out_features": 16,
-                    "share_observations": True,
+                    "share_observations": False,
                 }
             },
             "logger_config": {
@@ -64,7 +64,7 @@ if __name__ == '__main__':
                 }
             },
             "env_config": {
-                'world_shape': (5, 5),
+                'world_shape': [5, 5],
                 'n_agents': 3,
                 'max_episode_len': 10
             }

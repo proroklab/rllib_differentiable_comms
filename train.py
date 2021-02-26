@@ -15,8 +15,8 @@ from multi_trainer import MultiPPOTrainer
 from multi_action_dist import TorchHomogeneousMultiActionDistribution
 
 if __name__ == "__main__":
-    # ray.init(local_mode=True)
-    ray.init()
+    #ray.init(local_mode=True)
+    ray.init(include_dashboard=False)
 
     register_env("demo_env", lambda config: DemoMultiAgentEnv(config))
     ModelCatalog.register_custom_model("model", Model)
@@ -55,7 +55,7 @@ if __name__ == "__main__":
                     "encoder_out_features": 8,
                     "shared_nn_out_features_per_agent": 8,
                     "value_state_encoder_cnn_out_features": 16,
-                    "share_observations": False,
+                    "share_observations": True,
                 },
             },
             "logger_config": {

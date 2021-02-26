@@ -66,6 +66,11 @@ if __name__ == "__main__":
                     "api_key_file": "./wandb_api_key_file",
                 }
             },
-            "env_config": {"world_shape": [5, 5], "n_agents": 3, "max_episode_len": 10},
+            "env_config": {
+                "world_shape": [5, 5],
+                "n_agents": 3,
+                "max_episode_len": 10,
+                "action_space": "continuous"
+            },
         },
     )

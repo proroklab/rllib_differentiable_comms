@@ -5,50 +5,77 @@ from gym.utils import seeding, EzPickle
 from enum import Enum
 import copy
 
-DEFAULT_OPTIONS = {"world_shape": [5, 5], "n_agents": 3, "max_episode_len": 5}
+DEFAULT_OPTIONS = {"world_shape": [5, 5], "n_agents": 3, "max_episode_len": 5, "action_space": "discrete"}
 
 X = 1
 Y = 0
 
-
-class Action(Enum):
-    NOP = 0
-    MOVE_RIGHT = 1
-    MOVE_LEFT = 2
-    MOVE_UP = 3
-    MOVE_DOWN = 4
-
-
-class Agent:
+class BaseAgent:
     def __init__(self, index, world_shape, random_state):
         self.random_state = random_state
         self.index = index
         self.world_shape = world_shape
         self.reset()
 
+    def is_valid_pose(self, p):
+        return all([p[c] >= 0 and p[c] < self.world_shape[c] for c in [Y, X]])
+
+    def update_pose(self, delta_p):
+        desired_pos = self.pose + delta_p
+        if self.is_valid_pose(desired_pos):
+            self.pose = desired_pos
+
+    def get_obs(self):
+        return np.hstack([self.goal, self.pose])
+
     def reset(self):
-        self.pose = self.random_state.randint((0, 0), self.world_shape, (2,))
-        self.goal = self.random_state.randint((0, 0), self.world_shape, (2,))
+        raise NotImplementedError()
+
+    def step(self, action):
+        raise NotImplementedError()
+
+
+class DiscreteAgent(BaseAgent):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def reset(self):
+        self.pose = self.random_state.randint((0, 0), self.world_shape)
+        self.goal = self.random_state.randint((0, 0), self.world_shape)
         self.reached_goal = False
-        return self.goal
+        return 0
 
     def step(self, action):
         delta_pose = {
-            Action.MOVE_RIGHT: [0, 1],
-            Action.MOVE_LEFT: [0, -1],
-            Action.MOVE_UP: [-1, 0],
-            Action.MOVE_DOWN: [1, 0],
-            Action.NOP: [0, 0],
-        }[Action(action)]
+            0: [0, 0],
+            1: [0, 1],
+            2: [0, -1],
+            3: [-1, 0],
+            4: [1, 0],
+        }[action]
+        self.update_pose(delta_pose)
+        return self.get_obs()
 
-        is_valid_pose = lambda p: all(
-            [p[c] >= 0 and p[c] < self.world_shape[c] for c in [Y, X]]
-        )
-        desired_pos = self.pose + delta_pose
-        if is_valid_pose(desired_pos):
-            self.pose = desired_pos
 
-        return np.hstack([self.goal, self.pose])
+class ContinuousAgent(BaseAgent):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def reset(self):
+        self.pose = self.random_state.uniform((0, 0), self.world_shape)
+        self.goal = self.random_state.randint((0, 0), self.world_shape)
+        self.reached_goal = False
+        return [0, 0]
+
+    def step(self, action):
+        action_clipped = np.clip(action, -1, 1)
+        self.update_pose(action_clipped)
+        return self.get_obs()
+
+
+class InvalidConfigParameter(Exception):
+    """Raised when a configuration parameter is invalid"""
+    pass
 
 
 class DemoMultiAgentEnv(gym.Env, EzPickle):
@@ -68,10 +95,18 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
                 "state": spaces.Box(low=0, high=1, shape=self.cfg["world_shape"] + [2]),
             }
         )
-        self.action_space = spaces.Tuple((spaces.Discrete(5),) * self.cfg["n_agents"])
+        if self.cfg['action_space'] == "discrete":
+            agent_action_space = spaces.Discrete(5)
+            agent_class = DiscreteAgent
+        elif self.cfg['action_space'] == "continuous":
+            agent_action_space = spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=float)
+            agent_class = ContinuousAgent
+        else:
+            raise InvalidConfigParameter("Invalid action_space")
+        self.action_space = spaces.Tuple((agent_action_space,) * self.cfg["n_agents"])
 
         self.agents = [
-            Agent(i, self.cfg["world_shape"], self.random_state)
+            agent_class(i, self.cfg["world_shape"], self.random_state)
             for i in range(self.cfg["n_agents"])
         ]
 
@@ -82,9 +117,10 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
         return [seed]
 
     def reset(self):
-        self.goal_poses = [agent.reset() for agent in self.agents]
+        reset_actions = [agent.reset() for agent in self.agents]
+        self.goal_poses = [agent.goal for agent in self.agents]
         self.timestep = 0
-        return self.step([Action.NOP] * self.cfg["n_agents"])[0]
+        return self.step(reset_actions)[0]
 
     def step(self, actions):
         self.timestep += 1
@@ -99,7 +135,7 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
         shifted_poses = self.goal_poses[shift:] + self.goal_poses[:shift]
         for i, (agent, goal) in enumerate(zip(self.agents, shifted_poses)):
             rewards[i] = -1 if not agent.reached_goal else 0
-            if not agent.reached_goal and np.all(agent.pose == goal):
+            if not agent.reached_goal and np.linalg.norm(agent.pose - goal) < 1:
                 rewards[i] = 1
                 agent.reached_goal = True
 
@@ -109,8 +145,8 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
 
         global_state = np.zeros(self.cfg["world_shape"] + [2], dtype=np.uint8)
         for agent in self.agents:
-            global_state[agent.pose[Y], agent.pose[X], 0] = 1
-            global_state[agent.goal[Y], agent.goal[X], 1] = 1
+            global_state[int(agent.pose[Y]), int(agent.pose[X]), 0] = 1
+            global_state[int(agent.goal[Y]), int(agent.goal[X]), 1] = 1
 
         obs = {"agents": tuple(observations), "state": global_state}
         info = {"rewards": rewards}

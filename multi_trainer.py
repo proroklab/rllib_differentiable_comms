@@ -30,6 +30,11 @@ torch, nn = try_import_torch()
 
 logger = logging.getLogger(__name__)
 
+class InvalidActionSpace(Exception):
+    """Raised when the action space is invalid"""
+    pass
+
+
 def compute_gae_for_sample_batch(
         policy: Policy,
         sample_batch: SampleBatch,
@@ -72,13 +77,24 @@ def compute_gae_for_sample_batch(
             for s in samplebatch_infos["rewards"]
         ])
 
+    if not isinstance(policy.action_space, gym.spaces.tuple.Tuple):
+        raise InvalidActionSpace("Expect tuple action space")
+
     # samplebatches for each agents
     batches = []
-    for key in samplebatch_infos_rewards.keys():
+    for key, action_space in zip(samplebatch_infos_rewards.keys(), policy.action_space):
         i = int(key)
         sample_batch_agent = sample_batch.copy()
         sample_batch_agent[SampleBatch.REWARDS] = (samplebatch_infos_rewards[key])
-        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][:, i : i + 1]
+        if isinstance(action_space, gym.spaces.box.Box):
+            assert len(action_space.shape) == 1
+            a_w = action_space.shape[0]
+        elif isinstance(action_space, gym.spaces.discrete.Discrete):
+            a_w = 1
+        else:
+            raise InvalidActionSpace("Expect gym.spaces.box or gym.spaces.discrete action space")
+
+        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][:, a_w * i : a_w * (i + 1)]
         sample_batch_agent[SampleBatch.VF_PREDS] = sample_batch[SampleBatch.VF_PREDS][:, i]
 
         # Trajectory is actually complete -> last r=0.0.
@@ -160,17 +176,18 @@ def ppo_surrogate_loss(
     curr_action_dist = dist_class(logits, model)
     prev_action_dist = dist_class(train_batch[SampleBatch.ACTION_DIST_INPUTS],
                                   model)
+    logps = curr_action_dist.logp(train_batch[SampleBatch.ACTIONS])
+    entropies = curr_action_dist.entropy()
 
     action_kl = prev_action_dist.kl(curr_action_dist)
     mean_kl = reduce_mean_valid(torch.sum(action_kl, axis=1))
 
     for i in range(len(train_batch[SampleBatch.VF_PREDS][0])):
         logp_ratio = torch.exp(
-            curr_action_dist.logp(train_batch[SampleBatch.ACTIONS])[:, i] -
+            logps[:, i] -
             train_batch[SampleBatch.ACTION_LOGP][:, i])
 
-        curr_entropy = curr_action_dist.entropy()[:, i]
-        mean_entropy = reduce_mean_valid(curr_entropy)
+        mean_entropy = reduce_mean_valid(entropies[:, i])
 
         surrogate_loss = torch.min(
             train_batch[Postprocessing.ADVANTAGES][..., i] * logp_ratio,
@@ -194,12 +211,12 @@ def ppo_surrogate_loss(
             total_loss = reduce_mean_valid(
                 -surrogate_loss + policy.kl_coeff * action_kl[:, i] +
                 policy.config["vf_loss_coeff"] * vf_loss -
-                policy.entropy_coeff * curr_entropy)
+                policy.entropy_coeff * entropies[:, i])
         else:
             mean_vf_loss = 0.0
             total_loss = reduce_mean_valid(-surrogate_loss +
                                            policy.kl_coeff * action_kl[:, i] -
-                                           policy.entropy_coeff * curr_entropy)
+                                           policy.entropy_coeff * entropies[:, i])
 
         # Store stats in policy for stats_fn.
         loss_data.append(

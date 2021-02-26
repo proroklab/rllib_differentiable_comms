@@ -8,6 +8,8 @@ from typing import Dict, List, Optional, Type, Union
 
 import ray
 from ray.rllib.agents.ppo.ppo_tf_policy import setup_config
+from ray.rllib.agents.ppo.ppo_torch_policy import kl_and_loss_stats, \
+    vf_preds_fetches, setup_mixins, KLCoeffMixin, ValueNetworkMixin
 from ray.rllib.agents.trainer_template import build_trainer
 from ray.rllib.evaluation.episode import MultiAgentEpisode
 from ray.rllib.evaluation.postprocessing import compute_advantages, \
@@ -241,149 +243,6 @@ def ppo_surrogate_loss(
     policy._mean_kl = mean_kl
 
     return policy._total_loss
-
-
-def kl_and_loss_stats(policy: Policy,
-                      train_batch: SampleBatch) -> Dict[str, TensorType]:
-    """Stats function for PPO. Returns a dict with important KL and loss stats.
-    Args:
-        policy (Policy): The Policy to generate stats for.
-        train_batch (SampleBatch): The SampleBatch (already) used for training.
-    Returns:
-        Dict[str, TensorType]: The stats dict.
-    """
-    return {
-        "cur_kl_coeff": policy.kl_coeff,
-        "cur_lr": policy.cur_lr,
-        "total_loss": policy._total_loss,
-        "policy_loss": policy._mean_policy_loss,
-        "vf_loss": policy._mean_vf_loss,
-        "vf_explained_var": policy._vf_explained_var,
-        "kl": policy._mean_kl,
-        "entropy": policy._mean_entropy,
-        "entropy_coeff": policy.entropy_coeff,
-    }
-
-
-def vf_preds_fetches(
-        policy: Policy, input_dict: Dict[str, TensorType],
-        state_batches: List[TensorType], model: ModelV2,
-        action_dist: TorchDistributionWrapper) -> Dict[str, TensorType]:
-    """Defines extra fetches per action computation.
-    Args:
-        policy (Policy): The Policy to perform the extra action fetch on.
-        input_dict (Dict[str, TensorType]): The input dict used for the action
-            computing forward pass.
-        state_batches (List[TensorType]): List of state tensors (empty for
-            non-RNNs).
-        model (ModelV2): The Model object of the Policy.
-        action_dist (TorchDistributionWrapper): The instantiated distribution
-            object, resulting from the model's outputs and the given
-            distribution class.
-    Returns:
-        Dict[str, TensorType]: Dict with extra tf fetches to perform per
-            action computation.
-    """
-    # Return value function outputs. VF estimates will hence be added to the
-    # SampleBatches produced by the sampler(s) to generate the train batches
-    # going into the loss function.
-    return {
-        SampleBatch.VF_PREDS: policy.model.value_function(),
-    }
-
-
-class KLCoeffMixin:
-    """Assigns the `update_kl()` method to the PPOPolicy.
-    This is used in PPO's execution plan (see ppo.py) for updating the KL
-    coefficient after each learning step based on `config.kl_target` and
-    the measured KL value (from the train_batch).
-    """
-
-    def __init__(self, config):
-        # The current KL value (as python float).
-        self.kl_coeff = config["kl_coeff"]
-        # Constant target value.
-        self.kl_target = config["kl_target"]
-
-    def update_kl(self, sampled_kl):
-        # Update the current KL value based on the recently measured value.
-        if sampled_kl > 2.0 * self.kl_target:
-            self.kl_coeff *= 1.5
-        elif sampled_kl < 0.5 * self.kl_target:
-            self.kl_coeff *= 0.5
-        # Return the current KL value.
-        return self.kl_coeff
-
-
-class ValueNetworkMixin:
-    """Assigns the `_value()` method to the PPOPolicy.
-    This way, Policy can call `_value()` to get the current VF estimate on a
-    single(!) observation (as done in `postprocess_trajectory_fn`).
-    Note: When doing this, an actual forward pass is being performed.
-    This is different from only calling `model.value_function()`, where
-    the result of the most recent forward pass is being used to return an
-    already calculated tensor.
-    """
-
-    def __init__(self, obs_space, action_space, config):
-        # When doing GAE, we need the value function estimate on the
-        # observation.
-        if config["use_gae"]:
-            # Input dict is provided to us automatically via the Model's
-            # requirements. It's a single-timestep (last one in trajectory)
-            # input_dict.
-            if config["_use_trajectory_view_api"]:
-
-                def value(**input_dict):
-                    model_out, _ = self.model.from_batch(
-                        convert_to_torch_tensor(input_dict, self.device),
-                        is_training=False)
-                    # [0] = remove the batch dim.
-                    return self.model.value_function()[0]
-
-            # TODO: (sven) Remove once trajectory view API is all-algo default.
-            else:
-
-                def value(ob, prev_action, prev_reward, *state):
-                    model_out, _ = self.model({
-                        SampleBatch.CUR_OBS: convert_to_torch_tensor(
-                            np.asarray([ob]), self.device),
-                        SampleBatch.PREV_ACTIONS: convert_to_torch_tensor(
-                            np.asarray([prev_action]), self.device),
-                        SampleBatch.PREV_REWARDS: convert_to_torch_tensor(
-                            np.asarray([prev_reward]), self.device),
-                        "is_training": False,
-                    }, [
-                        convert_to_torch_tensor(np.asarray([s]), self.device)
-                        for s in state
-                    ], convert_to_torch_tensor(np.asarray([1]), self.device))
-                    # [0] = remove the batch dim.
-                    return self.model.value_function()[0]
-
-        # When not doing GAE, we do not require the value function's output.
-        else:
-
-            def value(*args, **kwargs):
-                return 0.0
-
-        self._value = value
-
-
-def setup_mixins(policy: Policy, obs_space: gym.spaces.Space,
-                 action_space: gym.spaces.Space,
-                 config: TrainerConfigDict) -> None:
-    """Call all mixin classes' constructors before PPOPolicy initialization.
-    Args:
-        policy (Policy): The Policy object.
-        obs_space (gym.spaces.Space): The Policy's observation space.
-        action_space (gym.spaces.Space): The Policy's action space.
-        config (TrainerConfigDict): The Policy's config.
-    """
-    ValueNetworkMixin.__init__(policy, obs_space, action_space, config)
-    KLCoeffMixin.__init__(policy, config)
-    EntropyCoeffSchedule.__init__(policy, config["entropy_coeff"],
-                                  config["entropy_coeff_schedule"])
-    LearningRateSchedule.__init__(policy, config["lr"], config["lr_schedule"])
 
 
 # Build a child class of `TorchPolicy`, given the custom functions defined

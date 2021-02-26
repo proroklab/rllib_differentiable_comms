@@ -29,7 +29,12 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
 
     @override(TorchMultiActionDistribution)
     def kl(self, other):
-        return torch.stack([
-            d.kl(o) for d, o in zip(self.flat_child_distributions,
-                                    other.flat_child_distributions)
-        ], axis=-1)
+        return torch.stack(
+            [
+                d.kl(o)
+                for d, o in zip(
+                    self.flat_child_distributions, other.flat_child_distributions
+                )
+            ],
+            axis=-1,
+        )

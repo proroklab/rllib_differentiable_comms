@@ -56,46 +56,30 @@ def compute_gae_for_sample_batch(
         SampleBatch: The postprocessed, modified SampleBatch (or a new one).
     """
 
-    samplebatch_infos_rewards = None
+    # the trajectory view API will pass populate the info dict with a np.zeros((n,))
+    # array in the first call, in that case the dtype will be float32 and we
+    # have to ignore it. For regular calls, we extract the rewards from the info
+    # dict into the samplebatch_infos_rewards dict, which now holds the rewards
+    # for all agents as dict.
+    samplebatch_infos_rewards = {'0': sample_batch[SampleBatch.INFOS]}
     if not sample_batch[SampleBatch.INFOS].dtype == "float32":
-        # the trajectory view API will pass empty data in the first call, we have to ignore it...
-        samplebatch_infos = SampleBatch.concat_samples(
-            [
-                SampleBatch({k: [v] for k, v in s.items()})
-                for s in sample_batch[SampleBatch.INFOS]
-            ]
-        )
-        samplebatch_infos_rewards = SampleBatch.concat_samples(
-            [
-                SampleBatch({str(k): [v] for k, v in s.items()})
-                for s in samplebatch_infos["rewards"]
-            ]
-        )
-        # samplebatch_infos_dones = SampleBatch.concat_samples([SampleBatch({str(k): [v] for k, v in s.items()}) for s in samplebatch_infos['dones']])
-
-    # We have to access these elements here, otherwise the trajectory view API will not add them to the next runs as completed is true
-    for j in range(policy.num_state_tensors()):
-        sample_batch["state_out_{}".format(j)]
-    sample_batch[SampleBatch.NEXT_OBS]
-    sample_batch[SampleBatch.ACTIONS]
-    sample_batch[SampleBatch.REWARDS]
+        samplebatch_infos = SampleBatch.concat_samples([
+            SampleBatch({k: [v] for k, v in s.items()})
+            for s in sample_batch[SampleBatch.INFOS]
+        ])
+        samplebatch_infos_rewards = SampleBatch.concat_samples([
+            SampleBatch({str(k): [v] for k, v in s.items()})
+            for s in samplebatch_infos["rewards"]
+        ])
 
     # samplebatches for each agents
     batches = []
-    for i in ["0", "1", "2"]:  # samplebatch_infos_rewards.keys():
+    for key in samplebatch_infos_rewards.keys():
+        i = int(key)
         sample_batch_agent = sample_batch.copy()
-        # sample_batch_agent["DONE"] = samplebatch_infos_dones[i]
-        sample_batch_agent[SampleBatch.REWARDS] = (
-            samplebatch_infos_rewards[i]
-            if samplebatch_infos_rewards is not None
-            else sample_batch[SampleBatch.INFOS]
-        )
-        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][
-            :, int(i) : (int(i) + 1)
-        ]
-        sample_batch_agent[SampleBatch.VF_PREDS] = sample_batch[SampleBatch.VF_PREDS][
-            :, int(i)
-        ]
+        sample_batch_agent[SampleBatch.REWARDS] = (samplebatch_infos_rewards[key])
+        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][:, i : i + 1]
+        sample_batch_agent[SampleBatch.VF_PREDS] = sample_batch[SampleBatch.VF_PREDS][:, i]
 
         # Trajectory is actually complete -> last r=0.0.
         if sample_batch[SampleBatch.DONES][-1]:
@@ -108,7 +92,7 @@ def compute_gae_for_sample_batch(
             # Create an input dict according to the Model's requirements.
             input_dict = policy.model.get_input_dict(
                 sample_batch, index="last")
-            last_r = policy._value(**input_dict)[int(i)].cpu()
+            last_r = policy._value(**input_dict)[i].cpu()
 
         # Adds the policy logits, VF preds, and advantages to the batch,
         # using GAE ("generalized advantage estimation") or not.

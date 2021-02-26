@@ -172,6 +172,12 @@ def ppo_surrogate_loss(
     loss_data = []
 
     curr_action_dist = dist_class(logits, model)
+    prev_action_dist = dist_class(train_batch[SampleBatch.ACTION_DIST_INPUTS],
+                                  model)
+
+    action_kl = prev_action_dist.kl(curr_action_dist)
+    mean_kl = reduce_mean_valid(torch.sum(action_kl, axis=1))
+
     for i in range(len(train_batch[SampleBatch.VF_PREDS][0])):
         logp_ratio = torch.exp(
             curr_action_dist.logp(train_batch[SampleBatch.ACTIONS])[:, i] -
@@ -200,13 +206,14 @@ def ppo_surrogate_loss(
             vf_loss = torch.max(vf_loss1, vf_loss2)
             mean_vf_loss = reduce_mean_valid(vf_loss)
             total_loss = reduce_mean_valid(
-                -surrogate_loss +
+                -surrogate_loss + policy.kl_coeff * action_kl[:, i] +
                 policy.config["vf_loss_coeff"] * vf_loss -
                 policy.entropy_coeff * curr_entropy)
         else:
             mean_vf_loss = 0.0
             total_loss = reduce_mean_valid(-surrogate_loss +
-                                           -policy.entropy_coeff * curr_entropy)
+                                           policy.kl_coeff * action_kl[:, i] -
+                                           policy.entropy_coeff * curr_entropy)
 
         # Store stats in policy for stats_fn.
         loss_data.append(
@@ -231,7 +238,7 @@ def ppo_surrogate_loss(
     policy._vf_explained_var = explained_variance(
         train_batch[Postprocessing.VALUE_TARGETS],
         policy.model.value_function())
-    policy._mean_kl = torch.Tensor([0])
+    policy._mean_kl = mean_kl
 
     return policy._total_loss
 

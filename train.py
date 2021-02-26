@@ -35,6 +35,7 @@ if __name__ == "__main__":
         config={
             "framework": "torch",
             "env": "demo_env",
+            "kl_coeff": 0.0,
             "lambda": 0.95,
             "clip_param": 0.2,
             "entropy_coeff": 0.01,

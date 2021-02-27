@@ -1,12 +1,11 @@
-import time
-import numpy as np
-import yaml
+import argparse
 import ray
 from ray import tune
 from ray.tune.registry import register_env
 
 from ray.tune.logger import pretty_print, DEFAULT_LOGGERS, TBXLogger
-from ray.tune.integration.wandb import WandbLogger
+
+# from ray.tune.integration.wandb import WandbLogger
 
 from environment import DemoMultiAgentEnv
 from model import Model
@@ -14,9 +13,9 @@ from ray.rllib.models import ModelCatalog
 from multi_trainer import MultiPPOTrainer
 from multi_action_dist import TorchHomogeneousMultiActionDistribution
 
-if __name__ == "__main__":
-    #ray.init(local_mode=True)
-    ray.init(include_dashboard=False)
+
+def train(share_observations=True, action_space="discrete", goal_shift=1):
+    ray.init()
 
     register_env("demo_env", lambda config: DemoMultiAgentEnv(config))
     ModelCatalog.register_custom_model("model", Model)
@@ -24,14 +23,13 @@ if __name__ == "__main__":
         "hom_multi_action", TorchHomogeneousMultiActionDistribution
     )
 
-    num_workers = 16
     tune.run(
         MultiPPOTrainer,
-        # restore="/home/jb2270/ray_results/PPO/PPO_world_0_2020-04-04_23-01-16c532w9iy/checkpoint_100/checkpoint-100",
         checkpoint_freq=1,
         keep_checkpoints_num=1,
-        # local_dir="/tmp",
-        loggers=DEFAULT_LOGGERS + (WandbLogger,),
+        local_dir="/tmp",
+        # loggers=DEFAULT_LOGGERS + (WandbLogger,),
+        stop={"training_iteration": 30},
         config={
             "framework": "torch",
             "env": "demo_env",
@@ -47,7 +45,7 @@ if __name__ == "__main__":
             "num_envs_per_worker": 1,
             "lr": 5e-4,
             "gamma": 0.99,
-            "batch_mode": "truncate_episodes",  # complete_episodes, truncate_episodes
+            "batch_mode": "truncate_episodes",
             "observation_filter": "NoFilter",
             "model": {
                 "custom_model": "model",
@@ -56,7 +54,7 @@ if __name__ == "__main__":
                     "encoder_out_features": 8,
                     "shared_nn_out_features_per_agent": 8,
                     "value_state_encoder_cnn_out_features": 16,
-                    "share_observations": True,
+                    "share_observations": share_observations,
                 },
             },
             "logger_config": {
@@ -70,7 +68,41 @@ if __name__ == "__main__":
                 "world_shape": [5, 5],
                 "n_agents": 3,
                 "max_episode_len": 10,
-                "action_space": "continuous"
+                "action_space": action_space,
+                "goal_shift": goal_shift,
             },
         },
+    )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="RLLib multi-agent with shared NN demo."
+    )
+    parser.add_argument(
+        "--action_space",
+        default="discrete",
+        const="discrete",
+        nargs="?",
+        choices=["continuous", "discrete"],
+        help="Train with continuous or discrete action space",
+    )
+    parser.add_argument(
+        "--disable_sharing",
+        action="store_true",
+        help="Do not instantiate shared central NN for sharing information",
+    )
+    parser.add_argument(
+        "--goal_shift",
+        type=int,
+        default=1,
+        choices=range(0, 2),
+        help="Goal shift offset (0 means that each agent moves to its own goal, 1 to its neighbor, etc.)",
+    )
+
+    args = parser.parse_args()
+    train(
+        share_observations=not args.disable_sharing,
+        action_space=args.action_space,
+        goal_shift=args.goal_shift,
     )

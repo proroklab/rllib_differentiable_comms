@@ -24,8 +24,8 @@ The most recent Ray version has to be installed from master from commit `8cedd16
 
 | Type | Comm | Command                                                       | Reward | Ep len |
 |------|------|---------------------------------------------------------------|--------|--------|
-| Cont | yes  | `python train.py --action_space discrete`                     | -0.5   | 2.9    |
+| Cont | yes  | `python train.py --action_space continuous`                   | -0.5   | 2.9    |
 | Dis  | yes  | `python train.py --action_space discrete`                     | -3.9   | 4.7    |
 | Cont | no   | `python train.py --action_space continuous --disable_sharing` | -14.8  | 8.4    |
-| Dis  | no   | `python train.py --action_space continuous --disable_sharing` | -22.2  | 8.9    |
+| Dis  | no   | `python train.py --action_space discrete --disable_sharing`   | -22.2  | 8.9    |
 

@@ -2,13 +2,10 @@ import numpy as np
 import gym
 from gym import spaces
 from gym.utils import seeding, EzPickle
-from enum import Enum
-import copy
-
-DEFAULT_OPTIONS = {"world_shape": [5, 5], "n_agents": 3, "max_episode_len": 5, "action_space": "discrete"}
 
 X = 1
 Y = 0
+
 
 class BaseAgent:
     def __init__(self, index, world_shape, random_state):
@@ -75,6 +72,7 @@ class ContinuousAgent(BaseAgent):
 
 class InvalidConfigParameter(Exception):
     """Raised when a configuration parameter is invalid"""
+
     pass
 
 
@@ -83,8 +81,7 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
         EzPickle.__init__(self)
         self.seed(1)
 
-        self.cfg = copy.deepcopy(DEFAULT_OPTIONS)
-        self.cfg.update(env_config)
+        self.cfg = env_config
 
         self.observation_space = spaces.Dict(
             {
@@ -95,11 +92,13 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
                 "state": spaces.Box(low=0, high=1, shape=self.cfg["world_shape"] + [2]),
             }
         )
-        if self.cfg['action_space'] == "discrete":
+        if self.cfg["action_space"] == "discrete":
             agent_action_space = spaces.Discrete(5)
             agent_class = DiscreteAgent
-        elif self.cfg['action_space'] == "continuous":
-            agent_action_space = spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=float)
+        elif self.cfg["action_space"] == "continuous":
+            agent_action_space = spaces.Box(
+                low=-np.inf, high=np.inf, shape=(2,), dtype=float
+            )
             agent_class = ContinuousAgent
         else:
             raise InvalidConfigParameter("Invalid action_space")
@@ -131,8 +130,10 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
 
         rewards = {}
         # shift each agent's goal so that the shared NN has to be used to solve the problem
-        shift = 1
-        shifted_poses = self.goal_poses[shift:] + self.goal_poses[:shift]
+        shifted_poses = (
+            self.goal_poses[self.cfg["goal_shift"] :]
+            + self.goal_poses[: self.cfg["goal_shift"]]
+        )
         for i, (agent, goal) in enumerate(zip(self.agents, shifted_poses)):
             rewards[i] = -1 if not agent.reached_goal else 0
             if not agent.reached_goal and np.linalg.norm(agent.pose - goal) < 1:
@@ -162,7 +163,7 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
             for x in range(self.cfg["world_shape"][X]):
                 c = " "
                 for i, agent in enumerate(self.agents):
-                    if np.all(agent.pose == np.array([y, x])):
+                    if np.all(agent.pose.astype(int) == np.array([y, x])):
                         c = "x" if agent.reached_goal else str(i)
                     if np.all(agent.goal == np.array([y, x])):
                         c = "abcdefghijklmnopqrstuvwxyz"[i]

@@ -108,7 +108,8 @@ def compute_gae_for_sample_batch(
             # Create an input dict according to the Model's requirements.
             input_dict = policy.model.get_input_dict(
                 sample_batch, index="last")
-            last_r = policy._value(**input_dict)[i].cpu()
+            all_values = policy._value(**input_dict, seq_lens=input_dict.seq_lens)
+            last_r = all_values[i].item()
 
         # Adds the policy logits, VF preds, and advantages to the batch,
         # using GAE ("generalized advantage estimation") or not.
@@ -246,6 +247,41 @@ def ppo_surrogate_loss(
     return policy._total_loss
 
 
+class ValueNetworkMixin:
+    """This is exactly the same mixin class as in ppo_torch_policy,
+    but that one calls .item() on self.model.value_function()[0],
+    which will not work for us since our value function returns
+    multiple values. Instead, we call .item() in
+    compute_gae_for_sample_batch above.
+    """
+
+    def __init__(self, obs_space, action_space, config):
+        if config["use_gae"]:
+
+            def value(**input_dict):
+                input_dict = SampleBatch(input_dict)
+                input_dict = self._lazy_tensor_dict(input_dict)
+                model_out, _ = self.model(input_dict)
+                # [0] = remove the batch dim.
+                return self.model.value_function()[0]
+
+        else:
+
+            def value(*args, **kwargs):
+                return 0.0
+
+        self._value = value
+
+
+def setup_mixins_override(policy: Policy, obs_space: gym.spaces.Space,
+                          action_space: gym.spaces.Space,
+                          config: TrainerConfigDict) -> None:
+    """Have to initialize the custom ValueNetworkMixin
+    """
+    setup_mixins(policy, obs_space, action_space, config)
+    ValueNetworkMixin.__init__(policy, obs_space, action_space, config)
+
+
 # Build a child class of `TorchPolicy`, given the custom functions defined
 # above.
 MultiPPOTorchPolicy = build_policy_class(
@@ -258,7 +294,7 @@ MultiPPOTorchPolicy = build_policy_class(
     postprocess_fn=compute_gae_for_sample_batch,
     extra_grad_process_fn=apply_grad_clipping,
     before_init=setup_config,
-    before_loss_init=setup_mixins,
+    before_loss_init=setup_mixins_override,
     mixins=[
         LearningRateSchedule, EntropyCoeffSchedule, KLCoeffMixin,
         ValueNetworkMixin

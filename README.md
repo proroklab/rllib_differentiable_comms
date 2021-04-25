@@ -16,7 +16,9 @@ Instead of a GNN, we use a simple centralized feedforward network. Such a model 
 ![overview image](https://raw.githubusercontent.com/janblumenkamp/rllib_multi_agent_demo/master/img/ray_multi_agent_demo_model_env.png "Overview")
 
 ## Setup
-The most recent Ray version has to be installed from master from commit `8cedd16f4440f5baf8c68d5012896512466c9f6a`. `requirements.txt` assumes Python 3.8 and Linux for Ray, depending on your Python version and operating system you have to modify it as exlained [here](https://docs.ray.io/en/master/installation.html#installing-from-a-specific-commit).
+```
+pip install -r requirements.txt
+```
 
 ## Results
 
@@ -24,8 +26,8 @@ The most recent Ray version has to be installed from master from commit `8cedd16
 
 | Type | Comm | Command                                                       | Reward | Ep len |
 |------|------|---------------------------------------------------------------|--------|--------|
-| Cont | yes  | `python train.py --action_space continuous`                   | -0.5   | 2.9    |
-| Dis  | yes  | `python train.py --action_space discrete`                     | -3.9   | 4.7    |
-| Cont | no   | `python train.py --action_space continuous --disable_sharing` | -14.8  | 8.4    |
-| Dis  | no   | `python train.py --action_space discrete --disable_sharing`   | -22.2  | 8.9    |
+| Cont | yes  | `python train.py --action_space continuous`                   | -0.75  | 3.0    |
+| Dis  | yes  | `python train.py --action_space discrete`                     | -3.95  | 4.7    |
+| Cont | no   | `python train.py --action_space continuous --disable_sharing` | -15.3  | 8.5    |
+| Dis  | no   | `python train.py --action_space discrete --disable_sharing`   | -21.2  | 8.9    |
 

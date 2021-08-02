@@ -86,19 +86,25 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
         self.observation_space = spaces.Dict(
             {
                 "agents": spaces.Tuple(
-                    (spaces.Box(low=0, high=max(self.cfg["world_shape"]), shape=(4,)),)
+                    (
+                        spaces.Box(
+                            low=0.0,
+                            high=float(max(self.cfg["world_shape"])),
+                            shape=(4,),
+                        ),
+                    )
                     * self.cfg["n_agents"]
                 ),
-                "state": spaces.Box(low=0, high=1, shape=self.cfg["world_shape"] + [2]),
+                "state": spaces.Box(
+                    low=0.0, high=1.0, shape=self.cfg["world_shape"] + [2]
+                ),
             }
         )
         if self.cfg["action_space"] == "discrete":
             agent_action_space = spaces.Discrete(5)
             agent_class = DiscreteAgent
         elif self.cfg["action_space"] == "continuous":
-            agent_action_space = spaces.Box(
-                low=-np.inf, high=np.inf, shape=(2,), dtype=float
-            )
+            agent_action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=float)
             agent_class = ContinuousAgent
         else:
             raise InvalidConfigParameter("Invalid action_space")

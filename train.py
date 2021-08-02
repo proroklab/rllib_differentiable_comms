@@ -38,6 +38,7 @@ def train(share_observations=True, action_space="discrete", goal_shift=1):
             "clip_param": 0.2,
             "entropy_coeff": 0.01,
             "train_batch_size": 10000,
+            "rollout_fragment_length": 1250,
             "sgd_minibatch_size": 2048,
             "num_sgd_iter": 16,
             "num_gpus": 1,

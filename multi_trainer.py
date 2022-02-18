@@ -1,34 +1,29 @@
 """
-PyTorch policy class used for PPO.
+PyTorch's policy class used for PPO.
 """
-import gym
 import logging
-import numpy as np
+from abc import ABC
 from typing import Dict, List, Optional, Type, Union
 
-import ray
-from ray.rllib.agents.ppo.ppo_tf_policy import setup_config
-from ray.rllib.agents.ppo.ppo_torch_policy import kl_and_loss_stats, \
-    vf_preds_fetches, setup_mixins, KLCoeffMixin, ValueNetworkMixin
-from ray.rllib.agents.trainer_template import build_trainer
+import gym
+import numpy as np
+from ray.rllib.agents.ppo import PPOTrainer
+from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy
 from ray.rllib.evaluation.episode import MultiAgentEpisode
-from ray.rllib.evaluation.postprocessing import compute_advantages, \
-    Postprocessing
+from ray.rllib.evaluation.postprocessing import Postprocessing, compute_advantages
+from ray.rllib.models import ActionDistribution
 from ray.rllib.models.modelv2 import ModelV2
-from ray.rllib.models.torch.torch_action_dist import TorchDistributionWrapper
 from ray.rllib.policy.policy import Policy
-from ray.rllib.policy.policy_template import build_policy_class
 from ray.rllib.policy.sample_batch import SampleBatch
-from ray.rllib.policy.torch_policy import EntropyCoeffSchedule, \
-    LearningRateSchedule
+from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.torch_ops import apply_grad_clipping, \
-    convert_to_torch_tensor, explained_variance, sequence_mask
-from ray.rllib.utils.typing import TensorType, TrainerConfigDict, AgentID
+from ray.rllib.utils.torch_utils import explained_variance, sequence_mask
+from ray.rllib.utils.typing import AgentID, TensorType
 
 torch, nn = try_import_torch()
 
 logger = logging.getLogger(__name__)
+
 
 class InvalidActionSpace(Exception):
     """Raised when the action space is invalid"""
@@ -39,7 +34,8 @@ def compute_gae_for_sample_batch(
         policy: Policy,
         sample_batch: SampleBatch,
         other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
-        episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
+        episode: Optional[MultiAgentEpisode] = None
+) -> SampleBatch:
     """Adds GAE (generalized advantage estimations) to a trajectory.
     The trajectory contains only data from one episode and from one agent.
     - If  `config.batch_mode=truncate_episodes` (default), sample_batch may
@@ -66,16 +62,22 @@ def compute_gae_for_sample_batch(
     # have to ignore it. For regular calls, we extract the rewards from the info
     # dict into the samplebatch_infos_rewards dict, which now holds the rewards
     # for all agents as dict.
-    samplebatch_infos_rewards = {'0': sample_batch[SampleBatch.INFOS]}
+    samplebatch_infos_rewards = {
+        '0': sample_batch[SampleBatch.INFOS]
+    }
     if not sample_batch[SampleBatch.INFOS].dtype == "float32":
-        samplebatch_infos = SampleBatch.concat_samples([
-            SampleBatch({k: [v] for k, v in s.items()})
-            for s in sample_batch[SampleBatch.INFOS]
-        ])
-        samplebatch_infos_rewards = SampleBatch.concat_samples([
-            SampleBatch({str(k): [v] for k, v in s.items()})
-            for s in samplebatch_infos["rewards"]
-        ])
+        samplebatch_infos = SampleBatch.concat_samples(
+            [
+                SampleBatch({k: [v] for k, v in s.items()})
+                for s in sample_batch[SampleBatch.INFOS]
+            ]
+        )
+        samplebatch_infos_rewards = SampleBatch.concat_samples(
+            [
+                SampleBatch({str(k): [v] for k, v in s.items()})
+                for s in samplebatch_infos["rewards"]
+            ]
+        )
 
     if not isinstance(policy.action_space, gym.spaces.tuple.Tuple):
         raise InvalidActionSpace("Expect tuple action space")
@@ -94,7 +96,7 @@ def compute_gae_for_sample_batch(
         else:
             raise InvalidActionSpace("Expect gym.spaces.box or gym.spaces.discrete action space")
 
-        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][:, a_w * i : a_w * (i + 1)]
+        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][:, a_w * i: a_w * (i + 1)]
         sample_batch_agent[SampleBatch.VF_PREDS] = sample_batch[SampleBatch.VF_PREDS][:, i]
 
         # Trajectory is actually complete -> last r=0.0.
@@ -107,10 +109,10 @@ def compute_gae_for_sample_batch(
             # input_dict.
             # Create an input dict according to the Model's requirements.
             input_dict = sample_batch.get_single_step_input_dict(
-                policy.model.view_requirements, index="last")
+                policy.model.view_requirements, index="last"
+            )
             all_values = policy._value(**input_dict)
             last_r = all_values[i].item()
-
 
         # Adds the policy logits, VF preds, and advantages to the batch,
         # using GAE ("generalized advantage estimation") or not.
@@ -139,29 +141,31 @@ def compute_gae_for_sample_batch(
 
 def ppo_surrogate_loss(
         policy: Policy, model: ModelV2,
-        dist_class: Type[TorchDistributionWrapper],
-        train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
+        dist_class: Type[ActionDistribution],
+        train_batch: SampleBatch
+) -> Union[TensorType, List[TensorType]]:
     """Constructs the loss for Proximal Policy Objective.
     Args:
         policy (Policy): The Policy to calculate the loss for.
         model (ModelV2): The Model to calculate the loss for.
-        dist_class (Type[ActionDistribution]: The action distr. class.
+        dist_class (Type[ActionDistribution]): The action distr. class.
         train_batch (SampleBatch): The training data.
     Returns:
         Union[TensorType, List[TensorType]]: A single loss tensor or a list
             of loss tensors.
     """
-    logits, state = model.from_batch(train_batch, is_training=True)
+    logits, state = model(train_batch)
     curr_action_dist = dist_class(logits, model)
 
     # RNN case: Mask away 0-padded chunks at end of time axis.
     if state:
-        B = len(train_batch["seq_lens"])
+        B = len(train_batch[SampleBatch.SEQ_LENS])
         max_seq_len = logits.shape[0] // B
         mask = sequence_mask(
-            train_batch["seq_lens"],
+            train_batch[SampleBatch.SEQ_LENS],
             max_seq_len,
-            time_major=model.is_time_major())
+            time_major=model.is_time_major()
+        )
         mask = torch.reshape(mask, [-1])
         num_valid = torch.sum(mask)
 
@@ -176,8 +180,10 @@ def ppo_surrogate_loss(
     loss_data = []
 
     curr_action_dist = dist_class(logits, model)
-    prev_action_dist = dist_class(train_batch[SampleBatch.ACTION_DIST_INPUTS],
-                                  model)
+    prev_action_dist = dist_class(
+        train_batch[SampleBatch.ACTION_DIST_INPUTS],
+        model
+    )
     logps = curr_action_dist.logp(train_batch[SampleBatch.ACTIONS])
     entropies = curr_action_dist.entropy()
 
@@ -187,38 +193,48 @@ def ppo_surrogate_loss(
     for i in range(len(train_batch[SampleBatch.VF_PREDS][0])):
         logp_ratio = torch.exp(
             logps[:, i] -
-            train_batch[SampleBatch.ACTION_LOGP][:, i])
+            train_batch[SampleBatch.ACTION_LOGP][:, i]
+        )
 
         mean_entropy = reduce_mean_valid(entropies[:, i])
 
         surrogate_loss = torch.min(
             train_batch[Postprocessing.ADVANTAGES][..., i] * logp_ratio,
             train_batch[Postprocessing.ADVANTAGES][..., i] * torch.clamp(
-                logp_ratio, 1 - policy.config["clip_param"],
-                1 + policy.config["clip_param"]))
+                logp_ratio,
+                1 - policy.config["clip_param"],
+                1 + policy.config["clip_param"]
+            )
+        )
         mean_policy_loss = reduce_mean_valid(-surrogate_loss)
 
         if policy.config["use_gae"]:
             prev_value_fn_out = train_batch[SampleBatch.VF_PREDS][..., i]
             value_fn_out = model.value_function()[..., i]
             vf_loss1 = torch.pow(
-                value_fn_out - train_batch[Postprocessing.VALUE_TARGETS][..., i], 2.0)
+                value_fn_out - train_batch[Postprocessing.VALUE_TARGETS][..., i], 2.0
+            )
             vf_clipped = prev_value_fn_out + torch.clamp(
                 value_fn_out - prev_value_fn_out, -policy.config["vf_clip_param"],
-                policy.config["vf_clip_param"])
+                policy.config["vf_clip_param"]
+            )
             vf_loss2 = torch.pow(
-                vf_clipped - train_batch[Postprocessing.VALUE_TARGETS][..., i], 2.0)
+                vf_clipped - train_batch[Postprocessing.VALUE_TARGETS][..., i], 2.0
+            )
             vf_loss = torch.max(vf_loss1, vf_loss2)
             mean_vf_loss = reduce_mean_valid(vf_loss)
             total_loss = reduce_mean_valid(
                 -surrogate_loss + policy.kl_coeff * action_kl[:, i] +
                 policy.config["vf_loss_coeff"] * vf_loss -
-                policy.entropy_coeff * entropies[:, i])
+                policy.entropy_coeff * entropies[:, i]
+            )
         else:
             mean_vf_loss = 0.0
-            total_loss = reduce_mean_valid(-surrogate_loss +
-                                           policy.kl_coeff * action_kl[:, i] -
-                                           policy.entropy_coeff * entropies[:, i])
+            total_loss = reduce_mean_valid(
+                -surrogate_loss +
+                policy.kl_coeff * action_kl[:, i] -
+                policy.entropy_coeff * entropies[:, i]
+            )
 
         # Store stats in policy for stats_fn.
         loss_data.append(
@@ -230,86 +246,63 @@ def ppo_surrogate_loss(
             }
         )
 
-    policy._total_loss = (torch.sum(torch.stack([o["total_loss"] for o in loss_data])),)
-    policy._mean_policy_loss = torch.mean(
+    model.tower_stats["total_loss"] = torch.sum(torch.stack([o["total_loss"] for o in loss_data]))
+    model.tower_stats["mean_policy_loss"] = torch.mean(
         torch.stack([o["mean_policy_loss"] for o in loss_data])
     )
-    policy._mean_vf_loss = torch.mean(
+    model.tower_stats["mean_vf_loss"] = torch.mean(
         torch.stack([o["mean_vf_loss"] for o in loss_data])
     )
-    policy._mean_entropy = torch.mean(
+    model.tower_stats["vf_explained_var"] = explained_variance(
+        train_batch[Postprocessing.VALUE_TARGETS],
+        policy.model.value_function()
+    )
+    model.tower_stats["mean_entropy"] = torch.mean(
         torch.stack([o["mean_entropy"] for o in loss_data])
     )
-    policy._vf_explained_var = explained_variance(
-        train_batch[Postprocessing.VALUE_TARGETS],
-        policy.model.value_function())
-    policy._mean_kl = mean_kl
+    model.tower_stats["mean_kl_loss"] = mean_kl
 
-    return policy._total_loss
+    return model.tower_stats["total_loss"]
 
 
-class ValueNetworkMixin:
-    """This is exactly the same mixin class as in ppo_torch_policy,
-    but that one calls .item() on self.model.value_function()[0],
-    which will not work for us since our value function returns
-    multiple values. Instead, we call .item() in
-    compute_gae_for_sample_batch above.
-    """
+class MultiPPOTorchPolicy(PPOTorchPolicy, ABC):
 
-    def __init__(self, obs_space, action_space, config):
-        if config["use_gae"]:
+    def __init__(self, observation_space, action_space, config):
+        super().__init__(observation_space, action_space, config)
 
-            def value(**input_dict):
-                input_dict = SampleBatch(input_dict)
-                input_dict = self._lazy_tensor_dict(input_dict)
-                model_out, _ = self.model(input_dict)
-                # [0] = remove the batch dim.
-                return self.model.value_function()[0]
+    @override(PPOTorchPolicy)
+    def loss(self, model, dist_class, train_batch):
+        return ppo_surrogate_loss(self, model, dist_class, train_batch)
 
+    @override(PPOTorchPolicy)
+    def postprocess_trajectory(self, sample_batch, other_agent_batches=None, episode=None):
+        return compute_gae_for_sample_batch(self, sample_batch, other_agent_batches, episode)
+
+    @override(PPOTorchPolicy)
+    def _value(self, **input_dict):
+        """This is exactly the as in PPOTorchPolicy,
+            but that one calls .item() on self.model.value_function()[0],
+            which will not work for us since our value function returns
+            multiple values. Instead, we call .item() in
+            compute_gae_for_sample_batch above.
+            """
+
+        # When doing GAE, we need the value function estimate on the
+        # observation.
+        if self.config["use_gae"]:
+            # Input dict is provided to us automatically via the Model's
+            # requirements. It's a single-timestep (last one in trajectory)
+            # input_dict.
+            input_dict = self._lazy_tensor_dict(input_dict)
+            model_out, _ = self.model(input_dict)
+            # [0] = remove the batch dim.
+            return self.model.value_function()[0]
+        # When not doing GAE, we do not require the value function's output.
         else:
-
-            def value(*args, **kwargs):
-                return 0.0
-
-        self._value = value
+            return 0.0
 
 
-def setup_mixins_override(policy: Policy, obs_space: gym.spaces.Space,
-                          action_space: gym.spaces.Space,
-                          config: TrainerConfigDict) -> None:
-    """Have to initialize the custom ValueNetworkMixin
-    """
-    setup_mixins(policy, obs_space, action_space, config)
-    ValueNetworkMixin.__init__(policy, obs_space, action_space, config)
-
-
-# Build a child class of `TorchPolicy`, given the custom functions defined
-# above.
-MultiPPOTorchPolicy = build_policy_class(
-    name="MultiPPOTorchPolicy",
-    framework="torch",
-    get_default_config=lambda: ray.rllib.agents.ppo.ppo.DEFAULT_CONFIG,
-    loss_fn=ppo_surrogate_loss,
-    stats_fn=kl_and_loss_stats,
-    extra_action_out_fn=vf_preds_fetches,
-    postprocess_fn=compute_gae_for_sample_batch,
-    extra_grad_process_fn=apply_grad_clipping,
-    before_init=setup_config,
-    before_loss_init=setup_mixins_override,
-    mixins=[
-        LearningRateSchedule, EntropyCoeffSchedule, KLCoeffMixin,
-        ValueNetworkMixin
-    ],
-)
-
-def get_policy_class(config):
-    return MultiPPOTorchPolicy
-
-MultiPPOTrainer = build_trainer(
-    name="MultiPPO",
-    default_config=ray.rllib.agents.ppo.ppo.DEFAULT_CONFIG,
-    validate_config=ray.rllib.agents.ppo.ppo.validate_config,
-    default_policy=MultiPPOTorchPolicy,
-    get_policy_class=get_policy_class,
-    execution_plan=ray.rllib.agents.ppo.ppo.execution_plan
-)
+class MultiPPOTrainer(PPOTrainer, ABC):
+    @override(PPOTrainer)
+    def get_default_policy_class(self, config):
+        return MultiPPOTorchPolicy

@@ -1,11 +1,8 @@
 import argparse
 import ray
 from ray import tune
+from ray.tune.integration.wandb import WandbLoggerCallback
 from ray.tune.registry import register_env
-
-from ray.tune.logger import pretty_print, DEFAULT_LOGGERS, TBXLogger
-
-# from ray.tune.integration.wandb import WandbLogger
 
 from environment import DemoMultiAgentEnv
 from model import Model
@@ -28,7 +25,11 @@ def train(share_observations=True, action_space="discrete", goal_shift=1):
         checkpoint_freq=1,
         keep_checkpoints_num=1,
         local_dir="/tmp",
-        # loggers=DEFAULT_LOGGERS + (WandbLogger,),
+        # callbacks=[WandbLoggerCallback(
+        #     project="",
+        #     api_key_file="",
+        #     log_config=True
+        # )],
         stop={"training_iteration": 30},
         config={
             "framework": "torch",
@@ -57,13 +58,6 @@ def train(share_observations=True, action_space="discrete", goal_shift=1):
                     "value_state_encoder_cnn_out_features": 16,
                     "share_observations": share_observations,
                 },
-            },
-            "logger_config": {
-                "wandb": {
-                    "project": "ray_multi_agent_trajectory",
-                    "group": "a",
-                    "api_key_file": "./wandb_api_key_file",
-                }
             },
             "env_config": {
                 "world_shape": [5, 5],

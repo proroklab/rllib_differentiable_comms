@@ -1,17 +1,10 @@
 from ray.rllib.models.modelv2 import ModelV2
-from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
-from ray.rllib.policy.rnn_sequencing import add_time_dimension
 from ray.rllib.models.torch.misc import (
-    normc_initializer,
-    same_padding,
     SlimConv2d,
-    SlimFC,
 )
-from ray.rllib.utils.annotations import override
+from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils import try_import_torch
-
-import numpy as np
-import copy
+from ray.rllib.utils.annotations import override
 
 torch, nn = try_import_torch()
 

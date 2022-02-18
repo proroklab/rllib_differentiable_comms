@@ -1,6 +1,4 @@
 import gym
-import numpy as np
-import tree
 from ray.rllib.models.torch.torch_action_dist import TorchMultiActionDistribution
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch

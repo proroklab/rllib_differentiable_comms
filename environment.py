@@ -9,13 +9,16 @@ Y = 0
 
 class BaseAgent:
     def __init__(self, index, world_shape, random_state):
+        self.goal = None
+        self.pose = None
+        self.reached_goal = None
         self.random_state = random_state
         self.index = index
         self.world_shape = world_shape
         self.reset()
 
     def is_valid_pose(self, p):
-        return all([p[c] >= 0 and p[c] < self.world_shape[c] for c in [Y, X]])
+        return all([0 <= p[c] < self.world_shape[c] for c in [Y, X]])
 
     def update_pose(self, delta_p):
         desired_pos = self.pose + delta_p

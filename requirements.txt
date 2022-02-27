@@ -1,3 +1,6 @@
 https://s3-us-west-2.amazonaws.com/ray-wheels/master/df581c584aeb7fad9783a21658b5e6671966c082/ray-2.0.0.dev0-cp38-cp38-manylinux2014_x86_64.whl
 torch==1.10.0
 gym==0.17.3
+tabulate
+dm_tree
+opencv_python

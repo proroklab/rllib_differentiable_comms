@@ -4,3 +4,6 @@ gym==0.17.3
 tabulate
 dm_tree
 opencv_python
+pandas
+reuqests
+lz4

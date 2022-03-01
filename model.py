@@ -21,6 +21,7 @@ class Model(TorchModelV2, nn.Module):
         shared_nn_out_features_per_agent,
         value_state_encoder_cnn_out_features,
         share_observations,
+        use_beta,
     ):
         TorchModelV2.__init__(
             self, obs_space, action_space, num_outputs, model_config, name
@@ -31,6 +32,7 @@ class Model(TorchModelV2, nn.Module):
         self.shared_nn_out_features_per_agent = shared_nn_out_features_per_agent
         self.value_state_encoder_cnn_out_features = value_state_encoder_cnn_out_features
         self.share_observations = share_observations
+        self.use_beta = use_beta
 
         self.n_agents = len(obs_space.original_space["agents"])
         self.outputs_per_agent = int(num_outputs / self.n_agents)

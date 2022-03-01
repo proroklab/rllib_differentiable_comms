@@ -1,7 +1,7 @@
 import argparse
 import ray
 from ray import tune
-from ray.tune.integration.wandb import WandbLoggerCallback
+# from ray.tune.integration.wandb import WandbLoggerCallback
 from ray.tune.registry import register_env
 
 from environment import DemoMultiAgentEnv
@@ -11,7 +11,7 @@ from multi_trainer import MultiPPOTrainer
 from multi_action_dist import TorchHomogeneousMultiActionDistribution
 
 
-def train(share_observations=True, action_space="discrete", goal_shift=1):
+def train(share_observations=True, use_beta=True, action_space="discrete", goal_shift=1):
     ray.init()
 
     register_env("demo_env", lambda config: DemoMultiAgentEnv(config))
@@ -57,6 +57,7 @@ def train(share_observations=True, action_space="discrete", goal_shift=1):
                     "shared_nn_out_features_per_agent": 8,
                     "value_state_encoder_cnn_out_features": 16,
                     "share_observations": share_observations,
+                    "use_beta": use_beta
                 },
             },
             "env_config": {
@@ -88,6 +89,11 @@ if __name__ == "__main__":
         help="Do not instantiate shared central NN for sharing information",
     )
     parser.add_argument(
+        "--disable_beta",
+        action="store_true",
+        help="Use a gaussian distribution instead of the default beta distribution",
+    )
+    parser.add_argument(
         "--goal_shift",
         type=int,
         default=1,
@@ -98,6 +104,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     train(
         share_observations=not args.disable_sharing,
+        use_beta=not args.disable_beta,
         action_space=args.action_space,
         goal_shift=args.goal_shift,
     )

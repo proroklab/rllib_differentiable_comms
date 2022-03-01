@@ -1,43 +1,101 @@
 import gym
-from ray.rllib.models.torch.torch_action_dist import TorchMultiActionDistribution
+from ray.rllib.models.torch.torch_action_dist import TorchMultiActionDistribution, TorchCategorical, TorchBeta, \
+    TorchDiagGaussian, TorchDistributionWrapper
+from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
+from ray.rllib.utils.typing import TensorType, List, Union, \
+    ModelConfigDict
 
 torch, nn = try_import_torch()
 
 
 class InvalidActionSpace(Exception):
     """Raised when the action space is invalid"""
-
     pass
 
 
+# Override the TorchBeta class to allow for vectors on
+class TorchBetaMulti(TorchBeta):
+
+    def __init__(self, inputs: List[TensorType], model: TorchModelV2, low: Union[float, TensorType] = 0.0,
+                 high: Union[float, TensorType] = 1.0):
+        super().__init__(inputs, model)
+        device = self.inputs.device
+        self.low = torch.tensor(low).to(device)
+        self.high = torch.tensor(high).to(device)
+
+        assert len(self.low.shape) == 1, "Low vector of beta must have only 1 dimension"
+        assert len(self.high.shape) == 1, "High vector of beta must have only 1 dimension"
+        assert self.low.shape[0] == 1 or self.low.shape[0] == self.inputs.shape[
+            -1], f"Size of low vector of beta must be either 1 ore match the size of the input, got {self.low.shape[0]} expected {self.inputs.shape[-1]}"
+        assert self.high.shape[0] == 1 or self.high.shape[0] == self.inputs.shape[
+            -1], f"Size of high vector of beta must be either 1 ore match the size of the input, got {self.high.shape[0]} expected {self.inputs.shape[-1]}"
+
+
 class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
+
     @override(TorchMultiActionDistribution)
-    def logp(self, x):
-        logps = []
-        for i, (d, action_space) in enumerate(
-            zip(self.flat_child_distributions, self.action_space_struct)
-        ):
-            if isinstance(action_space, gym.spaces.box.Box):
-                assert len(action_space.shape) == 1
-                a_w = action_space.shape[0]
-                x_sel = x[:, a_w * i : a_w * (i + 1)]
-            elif isinstance(action_space, gym.spaces.discrete.Discrete):
-                x_sel = x[:, i]
+    def __init__(self, inputs, model, *, child_distributions, input_lens,
+                 action_space):
+        super().__init__(inputs, model, child_distributions=child_distributions, input_lens=input_lens,
+                         action_space=action_space)
+        split_inputs = torch.split(inputs, self.input_lens, dim=1)
+        self.flat_child_distributions = []
+        for agent_action_space, agent_inputs in zip(self.action_space_struct, split_inputs):
+            if isinstance(agent_action_space, gym.spaces.box.Box):
+                assert len(agent_action_space.shape) == 1
+                if model.use_beta:
+                    self.flat_child_distributions.append(
+                        TorchBetaMulti(agent_inputs, model, low=agent_action_space.low,
+                                       high=agent_action_space.high))
+                else:
+                    self.flat_child_distributions.append(TorchDiagGaussian(agent_inputs, model))
+            elif isinstance(agent_action_space, gym.spaces.discrete.Discrete):
+                self.flat_child_distributions.append(TorchCategorical(agent_inputs, model))
             else:
                 raise InvalidActionSpace(
-                    "Expect gym.spaces.box or gym.spaces.discrete action space"
+                    "Expect gym.spaces.box or gym.spaces.discrete action space for each agent"
                 )
-            logps.append(d.logp(x_sel))
 
-        return torch.stack(logps, axis=1)
+    @override(TorchMultiActionDistribution)
+    def logp(self, x):
+        # x.shape = (BATCH, num_agents)
+        logps = []
+        assert len(self.flat_child_distributions) == len(self.action_space_struct)
+        i = 0
+        for agent_distribution, agent_action_space in zip(self.flat_child_distributions, self.action_space_struct):
+            if isinstance(agent_action_space, gym.spaces.box.Box):
+                # print(f"Agent action space shape: {action_space.shape}")
+                a_w = agent_action_space.shape[0]
+                x_agent = x[:, i: (i + a_w)]
+                i += a_w
+            elif isinstance(agent_action_space, gym.spaces.discrete.Discrete):
+                x_agent = x[:, i].int()
+                i += 1
+            else:
+                raise InvalidActionSpace(
+                    "Expect gym.spaces.box or gym.spaces.discrete action space for each agent"
+                )
+            agent_logps = agent_distribution.logp(x_agent)
+            if len(agent_logps.shape) > 1:
+                agent_logps = torch.sum(agent_logps, dim=1)
+
+            # agent_logps shape (BATCH_SIZE, 1)
+            logps.append(agent_logps)
+
+        # logps shape (BATCH_SIZE, NUM_AGENTS)
+        return torch.stack(logps, axis=-1)
 
     @override(TorchMultiActionDistribution)
     def entropy(self):
-        return torch.stack(
-            [d.entropy() for d in self.flat_child_distributions], axis=-1
-        )
+        entropies = []
+        for d in self.flat_child_distributions:
+            agent_entropy = d.entropy()
+            if len(agent_entropy.shape) > 1:
+                agent_entropy = torch.sum(agent_entropy, dim=1)
+            entropies.append(agent_entropy)
+        return torch.stack(entropies, axis=-1)
 
     @override(TorchMultiActionDistribution)
     def sampled_action_logp(self):
@@ -47,12 +105,13 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
 
     @override(TorchMultiActionDistribution)
     def kl(self, other):
+        kls = []
+        for d, o in zip(self.flat_child_distributions, other.flat_child_distributions):
+            agent_kl = d.kl(o)
+            if len(agent_kl.shape) > 1:
+                agent_kl = torch.sum(agent_kl, dim=1)
+            kls.append(agent_kl)
         return torch.stack(
-            [
-                d.kl(o)
-                for d, o in zip(
-                    self.flat_child_distributions, other.flat_child_distributions
-                )
-            ],
+            kls,
             axis=-1,
         )

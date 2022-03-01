@@ -4,8 +4,7 @@ from ray.rllib.models.torch.torch_action_dist import TorchMultiActionDistributio
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.typing import TensorType, List, Union, \
-    ModelConfigDict
+from ray.rllib.utils.typing import TensorType, List, Union
 
 torch, nn = try_import_torch()
 

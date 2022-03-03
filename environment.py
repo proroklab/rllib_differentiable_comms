@@ -82,6 +82,9 @@ class InvalidConfigParameter(Exception):
 class DemoMultiAgentEnv(gym.Env, EzPickle):
     def __init__(self, env_config):
         EzPickle.__init__(self)
+        self.timestep = None
+        self.goal_poses = None
+        self.random_state = None
         self.seed(1)
 
         self.cfg = env_config

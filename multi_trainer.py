@@ -82,7 +82,7 @@ def compute_gae_for_sample_batch(
     if not isinstance(policy.action_space, gym.spaces.tuple.Tuple):
         raise InvalidActionSpace("Expect tuple action space")
 
-    # samplebatches for each agents
+    # samplebatches for each agent
     batches = []
     for key, action_space in zip(samplebatch_infos_rewards.keys(), policy.action_space):
         i = int(key)

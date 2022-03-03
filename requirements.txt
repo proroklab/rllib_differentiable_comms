@@ -5,5 +5,5 @@ tabulate
 dm_tree
 opencv_python
 pandas
-reuqests
+requests
 lz4

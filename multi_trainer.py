@@ -84,6 +84,7 @@ def compute_gae_for_sample_batch(
 
     # samplebatches for each agent
     batches = []
+    action_index = 0
     for key, action_space in zip(samplebatch_infos_rewards.keys(), policy.action_space):
         i = int(key)
         sample_batch_agent = sample_batch.copy()
@@ -96,9 +97,10 @@ def compute_gae_for_sample_batch(
         else:
             raise InvalidActionSpace("Expect gym.spaces.box or gym.spaces.discrete action space")
 
-        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][:, a_w * i: a_w * (i + 1)]
+        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][:,
+                                                  action_index: (action_index + a_w)]
         sample_batch_agent[SampleBatch.VF_PREDS] = sample_batch[SampleBatch.VF_PREDS][:, i]
-
+        action_index += a_w
         # Trajectory is actually complete -> last r=0.0.
         if sample_batch[SampleBatch.DONES][-1]:
             last_r = 0.0
@@ -177,7 +179,6 @@ def ppo_surrogate_loss(
         mask = None
         reduce_mean_valid = torch.mean
 
-    loss_data = []
     prev_action_dist = dist_class(
         train_batch[SampleBatch.ACTION_DIST_INPUTS],
         model
@@ -189,18 +190,15 @@ def ppo_surrogate_loss(
 
     if use_kl > 0.0:
         action_kl = prev_action_dist.kl(curr_action_dist)
-        mean_kl_total = reduce_mean_valid(torch.sum(action_kl, axis=1))
     else:
         action_kl = torch.tensor(0.0, device=logps.device)
-        mean_kl_total = torch.tensor(0.0, device=logps.device)
 
+    loss_data = []
     for i in range(len(train_batch[SampleBatch.VF_PREDS][0])):
         logp_ratio = torch.exp(
             logps[:, i] -
             train_batch[SampleBatch.ACTION_LOGP][:, i]
         )
-
-        mean_entropy = reduce_mean_valid(curr_entropies[:, i])
 
         eps = policy.config["clip_param"]
         surrogate = torch.clamp(
@@ -210,14 +208,7 @@ def ppo_surrogate_loss(
             train_batch[Postprocessing.ADVANTAGES][..., i] * logp_ratio,
             train_batch[Postprocessing.ADVANTAGES][..., i] * surrogate,
         )
-
-        mean_policy_loss = reduce_mean_valid(-surrogate_loss)
-
-        if use_kl:
-            mean_kl = reduce_mean_valid(action_kl[:, i])
-        else:
-            mean_kl = torch.tensor(0.0, device=logps.device)
-
+       
         # Compute a value function loss.
         if policy.config["use_critic"]:
             value_fn_out = model.value_function()[..., i]
@@ -225,29 +216,33 @@ def ppo_surrogate_loss(
                 value_fn_out - train_batch[Postprocessing.VALUE_TARGETS][..., i], 2.0
             )
             vf_loss_clipped = torch.clamp(vf_loss, 0, policy.config["vf_clip_param"])
-            mean_vf_loss = reduce_mean_valid(vf_loss_clipped)
         # Ignore the value function.
         else:
-            vf_loss_clipped = mean_vf_loss = 0.0
+            vf_loss_clipped = 0.0
 
-        total_loss = reduce_mean_valid(
-            -surrogate_loss
-            + policy.config["vf_loss_coeff"] * vf_loss_clipped
-            - policy.entropy_coeff * curr_entropies[:, i]
-        )
+        total_loss = - surrogate_loss \
+                     + policy.config["vf_loss_coeff"] * vf_loss_clipped \
+                     - policy.entropy_coeff * curr_entropies[:, i]
 
         # Add mean_kl_loss (already processed through `reduce_mean_valid`),
         # if necessary.
         if use_kl:
-            total_loss += policy.kl_coeff * mean_kl
+            total_loss += policy.kl_coeff * action_kl[:, i]
 
-            # Store stats in policy for stats_fn.
+        total_loss = reduce_mean_valid(total_loss)
+        mean_policy_loss = reduce_mean_valid(-surrogate_loss)
+        mean_vf_loss = reduce_mean_valid(vf_loss_clipped) if policy.config["use_critic"] else 0.0
+        mean_entropy = reduce_mean_valid(curr_entropies[:, i])
+        mean_kl = reduce_mean_valid(action_kl[:, i]) if use_kl else torch.tensor([0.0])
+
+        # Store stats in policy for stats_fn.
         loss_data.append(
             {
                 "total_loss": total_loss,
                 "mean_policy_loss": mean_policy_loss,
                 "mean_vf_loss": mean_vf_loss,
                 "mean_entropy": mean_entropy,
+                "mean_kl": mean_kl,
             }
         )
 
@@ -265,10 +260,11 @@ def ppo_surrogate_loss(
     model.tower_stats["mean_entropy"] = torch.mean(
         torch.stack([o["mean_entropy"] for o in loss_data])
     )
-    model.tower_stats["mean_kl_loss"] = mean_kl_total
+    model.tower_stats["mean_kl_loss"] = torch.mean(
+        torch.stack([o["mean_kl"] for o in loss_data])
+    )
 
-    return model.tower_stats["total_loss"]
-
+    return torch.sum(torch.stack([o["total_loss"] for o in loss_data]))
 
 
 class MultiPPOTorchPolicy(PPOTorchPolicy, ABC):

@@ -1,7 +1,12 @@
 import gym
 import tree
-from ray.rllib.models.torch.torch_action_dist import TorchMultiActionDistribution, TorchCategorical, TorchBeta, \
-    TorchDiagGaussian, TorchDistributionWrapper
+from ray.rllib.models.torch.torch_action_dist import (
+    TorchMultiActionDistribution,
+    TorchCategorical,
+    TorchBeta,
+    TorchDiagGaussian,
+    TorchDistributionWrapper,
+)
 from ray.rllib.utils.spaces.space_utils import get_base_struct_from_space
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.annotations import override
@@ -13,32 +18,39 @@ torch, nn = try_import_torch()
 
 class InvalidActionSpace(Exception):
     """Raised when the action space is invalid"""
+
     pass
 
 
 # Override the TorchBeta class to allow for vectors on
 class TorchBetaMulti(TorchBeta):
-
-    def __init__(self, inputs: List[TensorType], model: TorchModelV2, low: Union[float, TensorType] = 0.0,
-                 high: Union[float, TensorType] = 1.0):
+    def __init__(
+        self,
+        inputs: List[TensorType],
+        model: TorchModelV2,
+        low: Union[float, TensorType] = 0.0,
+        high: Union[float, TensorType] = 1.0,
+    ):
         super().__init__(inputs, model)
         device = self.inputs.device
         self.low = torch.tensor(low).to(device)
         self.high = torch.tensor(high).to(device)
 
         assert len(self.low.shape) == 1, "Low vector of beta must have only 1 dimension"
-        assert len(self.high.shape) == 1, "High vector of beta must have only 1 dimension"
-        assert self.low.shape[0] == 1 or self.low.shape[0] == self.inputs.shape[
-            -1] // 2, f"Size of low vector of beta must be either 1 ore match the size of the input, got {self.low.shape[0]} expected {self.inputs.shape[-1]}"
-        assert self.high.shape[0] == 1 or self.high.shape[0] == self.inputs.shape[
-            -1] // 2, f"Size of high vector of beta must be either 1 ore match the size of the input, got {self.high.shape[0]} expected {self.inputs.shape[-1]}"
+        assert (
+            len(self.high.shape) == 1
+        ), "High vector of beta must have only 1 dimension"
+        assert (
+            self.low.shape[0] == 1 or self.low.shape[0] == self.inputs.shape[-1] // 2
+        ), f"Size of low vector of beta must be either 1 ore match the size of the input, got {self.low.shape[0]} expected {self.inputs.shape[-1]}"
+        assert (
+            self.high.shape[0] == 1 or self.high.shape[0] == self.inputs.shape[-1] // 2
+        ), f"Size of high vector of beta must be either 1 ore match the size of the input, got {self.high.shape[0]} expected {self.inputs.shape[-1]}"
 
 
 class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
-
     @override(TorchMultiActionDistribution)
-    def __init__(self, inputs, model, *, child_distributions, input_lens,
-                 action_space):
+    def __init__(self, inputs, model, *, child_distributions, input_lens, action_space):
         # Skip calling parent constructor, instead call grandparent constructor because
         # we do not want to compute the self.flat_child_distributions in the super constructor
         super(TorchMultiActionDistribution, self).__init__(inputs, model)
@@ -53,17 +65,28 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
         self.input_lens = tree.flatten(input_lens)
         split_inputs = torch.split(inputs, self.input_lens, dim=1)
         self.flat_child_distributions = []
-        for agent_action_space, agent_inputs in zip(self.action_space_struct, split_inputs):
+        for agent_action_space, agent_inputs in zip(
+            self.action_space_struct, split_inputs
+        ):
             if isinstance(agent_action_space, gym.spaces.box.Box):
                 assert len(agent_action_space.shape) == 1
                 if model.use_beta:
                     self.flat_child_distributions.append(
-                        TorchBetaMulti(agent_inputs, model, low=agent_action_space.low,
-                                       high=agent_action_space.high))
+                        TorchBetaMulti(
+                            agent_inputs,
+                            model,
+                            low=agent_action_space.low,
+                            high=agent_action_space.high,
+                        )
+                    )
                 else:
-                    self.flat_child_distributions.append(TorchDiagGaussian(agent_inputs, model))
+                    self.flat_child_distributions.append(
+                        TorchDiagGaussian(agent_inputs, model)
+                    )
             elif isinstance(agent_action_space, gym.spaces.discrete.Discrete):
-                self.flat_child_distributions.append(TorchCategorical(agent_inputs, model))
+                self.flat_child_distributions.append(
+                    TorchCategorical(agent_inputs, model)
+                )
             else:
                 raise InvalidActionSpace(
                     "Expect gym.spaces.box or gym.spaces.discrete action space for each agent"
@@ -75,11 +98,13 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
         logps = []
         assert len(self.flat_child_distributions) == len(self.action_space_struct)
         i = 0
-        for agent_distribution, agent_action_space in zip(self.flat_child_distributions, self.action_space_struct):
+        for agent_distribution, agent_action_space in zip(
+            self.flat_child_distributions, self.action_space_struct
+        ):
             if isinstance(agent_action_space, gym.spaces.box.Box):
                 # print(f"Agent action space shape: {action_space.shape}")
                 a_w = agent_action_space.shape[0]
-                x_agent = x[:, i: (i + a_w)]
+                x_agent = x[:, i : (i + a_w)]
                 i += a_w
             elif isinstance(agent_action_space, gym.spaces.discrete.Discrete):
                 x_agent = x[:, i].int()

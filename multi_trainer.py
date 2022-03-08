@@ -27,14 +27,15 @@ logger = logging.getLogger(__name__)
 
 class InvalidActionSpace(Exception):
     """Raised when the action space is invalid"""
+
     pass
 
 
 def compute_gae_for_sample_batch(
-        policy: Policy,
-        sample_batch: SampleBatch,
-        other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
-        episode: Optional[MultiAgentEpisode] = None
+    policy: Policy,
+    sample_batch: SampleBatch,
+    other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
+    episode: Optional[MultiAgentEpisode] = None,
 ) -> SampleBatch:
     """Adds GAE (generalized advantage estimations) to a trajectory.
     The trajectory contains only data from one episode and from one agent.
@@ -62,9 +63,7 @@ def compute_gae_for_sample_batch(
     # have to ignore it. For regular calls, we extract the rewards from the info
     # dict into the samplebatch_infos_rewards dict, which now holds the rewards
     # for all agents as dict.
-    samplebatch_infos_rewards = {
-        '0': sample_batch[SampleBatch.INFOS]
-    }
+    samplebatch_infos_rewards = {"0": sample_batch[SampleBatch.INFOS]}
     if not sample_batch[SampleBatch.INFOS].dtype == "float32":
         samplebatch_infos = SampleBatch.concat_samples(
             [
@@ -88,18 +87,23 @@ def compute_gae_for_sample_batch(
     for key, action_space in zip(samplebatch_infos_rewards.keys(), policy.action_space):
         i = int(key)
         sample_batch_agent = sample_batch.copy()
-        sample_batch_agent[SampleBatch.REWARDS] = (samplebatch_infos_rewards[key])
+        sample_batch_agent[SampleBatch.REWARDS] = samplebatch_infos_rewards[key]
         if isinstance(action_space, gym.spaces.box.Box):
             assert len(action_space.shape) == 1
             a_w = action_space.shape[0]
         elif isinstance(action_space, gym.spaces.discrete.Discrete):
             a_w = 1
         else:
-            raise InvalidActionSpace("Expect gym.spaces.box or gym.spaces.discrete action space")
+            raise InvalidActionSpace(
+                "Expect gym.spaces.box or gym.spaces.discrete action space"
+            )
 
-        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][:,
-                                                  action_index: (action_index + a_w)]
-        sample_batch_agent[SampleBatch.VF_PREDS] = sample_batch[SampleBatch.VF_PREDS][:, i]
+        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][
+            :, action_index : (action_index + a_w)
+        ]
+        sample_batch_agent[SampleBatch.VF_PREDS] = sample_batch[SampleBatch.VF_PREDS][
+            :, i
+        ]
         action_index += a_w
         # Trajectory is actually complete -> last r=0.0.
         if sample_batch[SampleBatch.DONES][-1]:
@@ -125,7 +129,7 @@ def compute_gae_for_sample_batch(
                 policy.config["gamma"],
                 policy.config["lambda"],
                 use_gae=policy.config["use_gae"],
-                use_critic=policy.config.get("use_critic", True)
+                use_critic=policy.config.get("use_critic", True),
             )
         )
 
@@ -142,9 +146,10 @@ def compute_gae_for_sample_batch(
 
 
 def ppo_surrogate_loss(
-        policy: Policy, model: ModelV2,
-        dist_class: Type[ActionDistribution],
-        train_batch: SampleBatch
+    policy: Policy,
+    model: ModelV2,
+    dist_class: Type[ActionDistribution],
+    train_batch: SampleBatch,
 ) -> Union[TensorType, List[TensorType]]:
     """Constructs the loss for Proximal Policy Objective.
     Args:
@@ -166,7 +171,7 @@ def ppo_surrogate_loss(
         mask = sequence_mask(
             train_batch[SampleBatch.SEQ_LENS],
             max_seq_len,
-            time_major=model.is_time_major()
+            time_major=model.is_time_major(),
         )
         mask = torch.reshape(mask, [-1])
         num_valid = torch.sum(mask)
@@ -179,10 +184,7 @@ def ppo_surrogate_loss(
         mask = None
         reduce_mean_valid = torch.mean
 
-    prev_action_dist = dist_class(
-        train_batch[SampleBatch.ACTION_DIST_INPUTS],
-        model
-    )
+    prev_action_dist = dist_class(train_batch[SampleBatch.ACTION_DIST_INPUTS], model)
     logps = curr_action_dist.logp(train_batch[SampleBatch.ACTIONS])
 
     curr_entropies = curr_action_dist.entropy()
@@ -195,20 +197,15 @@ def ppo_surrogate_loss(
 
     loss_data = []
     for i in range(len(train_batch[SampleBatch.VF_PREDS][0])):
-        logp_ratio = torch.exp(
-            logps[:, i] -
-            train_batch[SampleBatch.ACTION_LOGP][:, i]
-        )
+        logp_ratio = torch.exp(logps[:, i] - train_batch[SampleBatch.ACTION_LOGP][:, i])
 
         eps = policy.config["clip_param"]
-        surrogate = torch.clamp(
-            logp_ratio, 1 - eps, 1 + eps
-        )
+        surrogate = torch.clamp(logp_ratio, 1 - eps, 1 + eps)
         surrogate_loss = torch.min(
             train_batch[Postprocessing.ADVANTAGES][..., i] * logp_ratio,
             train_batch[Postprocessing.ADVANTAGES][..., i] * surrogate,
         )
-       
+
         # Compute a value function loss.
         if policy.config["use_critic"]:
             value_fn_out = model.value_function()[..., i]
@@ -220,9 +217,11 @@ def ppo_surrogate_loss(
         else:
             vf_loss_clipped = 0.0
 
-        total_loss = - surrogate_loss \
-                     + policy.config["vf_loss_coeff"] * vf_loss_clipped \
-                     - policy.entropy_coeff * curr_entropies[:, i]
+        total_loss = (
+            -surrogate_loss
+            + policy.config["vf_loss_coeff"] * vf_loss_clipped
+            - policy.entropy_coeff * curr_entropies[:, i]
+        )
 
         # Add mean_kl_loss (already processed through `reduce_mean_valid`),
         # if necessary.
@@ -231,7 +230,9 @@ def ppo_surrogate_loss(
 
         total_loss = reduce_mean_valid(total_loss)
         mean_policy_loss = reduce_mean_valid(-surrogate_loss)
-        mean_vf_loss = reduce_mean_valid(vf_loss_clipped) if policy.config["use_critic"] else 0.0
+        mean_vf_loss = (
+            reduce_mean_valid(vf_loss_clipped) if policy.config["use_critic"] else 0.0
+        )
         mean_entropy = reduce_mean_valid(curr_entropies[:, i])
         mean_kl = reduce_mean_valid(action_kl[:, i]) if use_kl else torch.tensor([0.0])
 
@@ -246,7 +247,9 @@ def ppo_surrogate_loss(
             }
         )
 
-    model.tower_stats["total_loss"] = torch.sum(torch.stack([o["total_loss"] for o in loss_data]))
+    model.tower_stats["total_loss"] = torch.sum(
+        torch.stack([o["total_loss"] for o in loss_data])
+    )
     model.tower_stats["mean_policy_loss"] = torch.mean(
         torch.stack([o["mean_policy_loss"] for o in loss_data])
     )
@@ -254,8 +257,7 @@ def ppo_surrogate_loss(
         torch.stack([o["mean_vf_loss"] for o in loss_data])
     )
     model.tower_stats["vf_explained_var"] = explained_variance(
-        train_batch[Postprocessing.VALUE_TARGETS],
-        policy.model.value_function()
+        train_batch[Postprocessing.VALUE_TARGETS], policy.model.value_function()
     )
     model.tower_stats["mean_entropy"] = torch.mean(
         torch.stack([o["mean_entropy"] for o in loss_data])
@@ -268,7 +270,6 @@ def ppo_surrogate_loss(
 
 
 class MultiPPOTorchPolicy(PPOTorchPolicy, ABC):
-
     def __init__(self, observation_space, action_space, config):
         super().__init__(observation_space, action_space, config)
 
@@ -277,17 +278,21 @@ class MultiPPOTorchPolicy(PPOTorchPolicy, ABC):
         return ppo_surrogate_loss(self, model, dist_class, train_batch)
 
     @override(PPOTorchPolicy)
-    def postprocess_trajectory(self, sample_batch, other_agent_batches=None, episode=None):
-        return compute_gae_for_sample_batch(self, sample_batch, other_agent_batches, episode)
+    def postprocess_trajectory(
+        self, sample_batch, other_agent_batches=None, episode=None
+    ):
+        return compute_gae_for_sample_batch(
+            self, sample_batch, other_agent_batches, episode
+        )
 
     @override(PPOTorchPolicy)
     def _value(self, **input_dict):
         """This is exactly the as in PPOTorchPolicy,
-            but that one calls .item() on self.model.value_function()[0],
-            which will not work for us since our value function returns
-            multiple values. Instead, we call .item() in
-            compute_gae_for_sample_batch above.
-            """
+        but that one calls .item() on self.model.value_function()[0],
+        which will not work for us since our value function returns
+        multiple values. Instead, we call .item() in
+        compute_gae_for_sample_batch above.
+        """
 
         # When doing GAE, we need the value function estimate on the
         # observation.

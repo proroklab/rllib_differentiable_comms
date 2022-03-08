@@ -1,6 +1,7 @@
 import argparse
 import ray
 from ray import tune
+
 # from ray.tune.integration.wandb import WandbLoggerCallback
 from ray.tune.registry import register_env
 
@@ -11,7 +12,9 @@ from multi_trainer import MultiPPOTrainer
 from multi_action_dist import TorchHomogeneousMultiActionDistribution
 
 
-def train(share_observations=True, use_beta=True, action_space="discrete", goal_shift=1):
+def train(
+    share_observations=True, use_beta=True, action_space="discrete", goal_shift=1
+):
     ray.init()
 
     register_env("demo_env", lambda config: DemoMultiAgentEnv(config))
@@ -57,7 +60,7 @@ def train(share_observations=True, use_beta=True, action_space="discrete", goal_
                     "shared_nn_out_features_per_agent": 8,
                     "value_state_encoder_cnn_out_features": 16,
                     "share_observations": share_observations,
-                    "use_beta": use_beta
+                    "use_beta": use_beta,
                 },
             },
             "env_config": {

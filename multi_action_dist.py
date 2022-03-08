@@ -27,9 +27,9 @@ class TorchBetaMulti(TorchBeta):
         assert len(self.low.shape) == 1, "Low vector of beta must have only 1 dimension"
         assert len(self.high.shape) == 1, "High vector of beta must have only 1 dimension"
         assert self.low.shape[0] == 1 or self.low.shape[0] == self.inputs.shape[
-            -1], f"Size of low vector of beta must be either 1 ore match the size of the input, got {self.low.shape[0]} expected {self.inputs.shape[-1]}"
+            -1] // 2, f"Size of low vector of beta must be either 1 ore match the size of the input, got {self.low.shape[0]} expected {self.inputs.shape[-1]}"
         assert self.high.shape[0] == 1 or self.high.shape[0] == self.inputs.shape[
-            -1], f"Size of high vector of beta must be either 1 ore match the size of the input, got {self.high.shape[0]} expected {self.inputs.shape[-1]}"
+            -1] // 2, f"Size of high vector of beta must be either 1 ore match the size of the input, got {self.high.shape[0]} expected {self.inputs.shape[-1]}"
 
 
 class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):

@@ -1,6 +1,8 @@
 import gym
+import tree
 from ray.rllib.models.torch.torch_action_dist import TorchMultiActionDistribution, TorchCategorical, TorchBeta, \
     TorchDiagGaussian, TorchDistributionWrapper
+from ray.rllib.utils.spaces.space_utils import get_base_struct_from_space
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
@@ -37,8 +39,18 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
     @override(TorchMultiActionDistribution)
     def __init__(self, inputs, model, *, child_distributions, input_lens,
                  action_space):
-        super().__init__(inputs, model, child_distributions=child_distributions, input_lens=input_lens,
-                         action_space=action_space)
+        # Skip calling parent constructor, instead call grandparent constructor because
+        # we do not want to compute the self.flat_child_distributions in the super constructor
+        super(TorchMultiActionDistribution, self).__init__(inputs, model)
+
+        if not isinstance(inputs, torch.Tensor):
+            inputs = torch.from_numpy(inputs)
+            if isinstance(model, TorchModelV2):
+                inputs = inputs.to(next(model.parameters()).device)
+
+        self.action_space_struct = get_base_struct_from_space(action_space)
+
+        self.input_lens = tree.flatten(input_lens)
         split_inputs = torch.split(inputs, self.input_lens, dim=1)
         self.flat_child_distributions = []
         for agent_action_space, agent_inputs in zip(self.action_space_struct, split_inputs):

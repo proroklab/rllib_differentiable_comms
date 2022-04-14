@@ -62,8 +62,11 @@ def compute_gae_for_sample_batch(
     if sample_batch[SampleBatch.INFOS].dtype == "float32":
         # The trajectory view API will pass populate the info dict with a np.zeros((ROLLOUT_SIZE,))
         # array in the first call, in that case the dtype will be float32, and we
-        # have to ignore it by assigning it to agent 0
-        samplebatch_infos_rewards = {"0": sample_batch[SampleBatch.INFOS]}
+        # ignore it by assignining it to all agents
+        samplebatch_infos_rewards = {
+            str(agent_index): sample_batch[SampleBatch.INFOS]
+            for agent_index in range(len(policy.action_space))
+        }
 
     else:
         #  For regular calls, we extract the rewards from the info

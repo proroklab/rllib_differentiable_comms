@@ -59,25 +59,30 @@ def compute_gae_for_sample_batch(
         SampleBatch: The postprocessed, modified SampleBatch (or a new one).
     """
 
-    # the trajectory view API will pass populate the info dict with a np.zeros((n,))
-    # array in the first call, in that case the dtype will be float32 and we
-    # have to ignore it. For regular calls, we extract the rewards from the info
-    # dict into the samplebatch_infos_rewards dict, which now holds the rewards
-    # for all agents as dict.
-    samplebatch_infos_rewards = {"0": sample_batch[SampleBatch.INFOS]}
-    if not sample_batch[SampleBatch.INFOS].dtype == "float32":
-        samplebatch_infos = SampleBatch.concat_samples(
-            [
-                SampleBatch({k: [v] for k, v in s.items()})
-                for s in sample_batch[SampleBatch.INFOS]
-            ]
-        )
+    if sample_batch[SampleBatch.INFOS].dtype == "float32":
+        # The trajectory view API will pass populate the info dict with a np.zeros((ROLLOUT_SIZE,))
+        # array in the first call, in that case the dtype will be float32, and we
+        # have to ignore it by assigning it to agent 0
+        samplebatch_infos_rewards = {"0": sample_batch[SampleBatch.INFOS]}
+
+    else:
+        #  For regular calls, we extract the rewards from the info
+        #  dict into the samplebatch_infos_rewards dict, which now holds the rewards
+        #  for all agents as dict.
+
+        # sample_batch[SampleBatch.INFOS] = list of len ROLLOUT_SIZE of which every element is
+        # {'rewards': {0: -0.077463925, 1: -0.0029145998, 2: -0.08233316}} if there are 3 agents
+
         samplebatch_infos_rewards = SampleBatch.concat_samples(
             [
-                SampleBatch({str(k): [v] for k, v in s.items()})
-                for s in samplebatch_infos["rewards"]
+                SampleBatch({str(k): [v] for k, v in s["rewards"].items()})
+                for s in sample_batch[SampleBatch.INFOS]
+                # s = {'rewards': {0: -0.077463925, 1: -0.0029145998, 2: -0.08233316}} if there are 3 agents
             ]
         )
+
+        # samplebatch_infos_rewards = SampleBatch(ROLLOUT_SIZE: ['0', '1', '2']) if there are 3 agents
+        # (i.e. it has ROLLOUT_SIZE entries with keys '0','1','2')
 
     if not isinstance(policy.action_space, gym.spaces.tuple.Tuple):
         raise InvalidActionSpace("Expect tuple action space")

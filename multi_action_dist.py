@@ -5,12 +5,11 @@ from ray.rllib.models.torch.torch_action_dist import (
     TorchCategorical,
     TorchBeta,
     TorchDiagGaussian,
-    TorchDistributionWrapper,
 )
-from ray.rllib.utils.spaces.space_utils import get_base_struct_from_space
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
+from ray.rllib.utils.spaces.space_utils import get_base_struct_from_space
 from ray.rllib.utils.typing import TensorType, List, Union
 
 torch, nn = try_import_torch()

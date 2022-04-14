@@ -17,6 +17,7 @@ from ray.rllib.policy.policy import Policy
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
+from ray.rllib.utils.numpy import convert_to_numpy
 from ray.rllib.utils.torch_utils import explained_variance, sequence_mask
 from ray.rllib.utils.typing import AgentID, TensorType
 
@@ -195,6 +196,12 @@ def ppo_surrogate_loss(
     else:
         action_kl = torch.tensor(0.0, device=logps.device)
 
+    # Compute a value function loss.
+    if policy.config["use_critic"]:
+        value_fn_out = model.value_function()
+    else:
+        value_fn_out = 0.0
+
     loss_data = []
     for i in range(len(train_batch[SampleBatch.VF_PREDS][0])):
         logp_ratio = torch.exp(logps[:, i] - train_batch[SampleBatch.ACTION_LOGP][:, i])
@@ -208,9 +215,10 @@ def ppo_surrogate_loss(
 
         # Compute a value function loss.
         if policy.config["use_critic"]:
-            value_fn_out = model.value_function()[..., i]
+            agent_value_fn_out = value_fn_out[..., i]
             vf_loss = torch.pow(
-                value_fn_out - train_batch[Postprocessing.VALUE_TARGETS][..., i], 2.0
+                agent_value_fn_out - train_batch[Postprocessing.VALUE_TARGETS][..., i],
+                2.0,
             )
             vf_loss_clipped = torch.clamp(vf_loss, 0, policy.config["vf_clip_param"])
         # Ignore the value function.
@@ -230,9 +238,7 @@ def ppo_surrogate_loss(
 
         total_loss = reduce_mean_valid(total_loss)
         mean_policy_loss = reduce_mean_valid(-surrogate_loss)
-        mean_vf_loss = (
-            reduce_mean_valid(vf_loss_clipped) if policy.config["use_critic"] else 0.0
-        )
+        mean_vf_loss = reduce_mean_valid(vf_loss_clipped)
         mean_entropy = reduce_mean_valid(curr_entropies[:, i])
         mean_kl = reduce_mean_valid(action_kl[:, i]) if use_kl else torch.tensor([0.0])
 
@@ -257,7 +263,7 @@ def ppo_surrogate_loss(
         torch.stack([o["mean_vf_loss"] for o in loss_data])
     )
     model.tower_stats["vf_explained_var"] = explained_variance(
-        train_batch[Postprocessing.VALUE_TARGETS], policy.model.value_function()
+        train_batch[Postprocessing.VALUE_TARGETS], value_fn_out
     )
     model.tower_stats["mean_entropy"] = torch.mean(
         torch.stack([o["mean_entropy"] for o in loss_data])
@@ -281,9 +287,14 @@ class MultiPPOTorchPolicy(PPOTorchPolicy, ABC):
     def postprocess_trajectory(
         self, sample_batch, other_agent_batches=None, episode=None
     ):
-        return compute_gae_for_sample_batch(
-            self, sample_batch, other_agent_batches, episode
-        )
+        # Do all post-processing always with no_grad().
+        # Not using this here will introduce a memory leak
+        # in torch (issue #6962).
+        # TODO: no_grad still necessary?
+        with torch.no_grad():
+            return compute_gae_for_sample_batch(
+                self, sample_batch, other_agent_batches, episode
+            )
 
     @override(PPOTorchPolicy)
     def _value(self, **input_dict):

@@ -58,6 +58,7 @@ def compute_gae_for_sample_batch(
     Returns:
         SampleBatch: The postprocessed, modified SampleBatch (or a new one).
     """
+    n_agents = len(policy.action_space)
 
     if sample_batch[SampleBatch.INFOS].dtype == "float32":
         # The trajectory view API will pass populate the info dict with a np.zeros((ROLLOUT_SIZE,))
@@ -65,7 +66,7 @@ def compute_gae_for_sample_batch(
         # ignore it by assignining it to all agents
         samplebatch_infos_rewards = {
             str(agent_index): sample_batch[SampleBatch.INFOS]
-            for agent_index in range(len(policy.action_space))
+            for agent_index in range(n_agents)
         }
 
     else:
@@ -90,11 +91,21 @@ def compute_gae_for_sample_batch(
     if not isinstance(policy.action_space, gym.spaces.tuple.Tuple):
         raise InvalidActionSpace("Expect tuple action space")
 
-    # samplebatches for each agent
-    batches = []
+    keys_to_overwirte = [
+        SampleBatch.REWARDS,
+        SampleBatch.VF_PREDS,
+        Postprocessing.ADVANTAGES,
+        Postprocessing.VALUE_TARGETS,
+    ]
+
+    # We prepare the sample batch to contain the agent batches
+    for k in keys_to_overwirte:
+        sample_batch[k] = np.zeros((len(sample_batch), n_agents))
+
+    # Create the sample_batch for each agent
     action_index = 0
     for key, action_space in zip(samplebatch_infos_rewards.keys(), policy.action_space):
-        i = int(key)
+        agent_index = int(key)
         sample_batch_agent = sample_batch.copy()
         sample_batch_agent[SampleBatch.REWARDS] = samplebatch_infos_rewards[key]
         if isinstance(action_space, gym.spaces.box.Box):
@@ -111,7 +122,7 @@ def compute_gae_for_sample_batch(
             :, action_index : (action_index + a_w)
         ]
         sample_batch_agent[SampleBatch.VF_PREDS] = sample_batch[SampleBatch.VF_PREDS][
-            :, i
+            :, agent_index
         ]
         action_index += a_w
         # Trajectory is actually complete -> last r=0.0.
@@ -127,29 +138,21 @@ def compute_gae_for_sample_batch(
                 policy.model.view_requirements, index="last"
             )
             all_values = policy._value(**input_dict)
-            last_r = all_values[i].item()
+            last_r = all_values[agent_index].item()
 
         # Adds the policy logits, VF preds, and advantages to the batch,
         # using GAE ("generalized advantage estimation") or not.
-        batches.append(
-            compute_advantages(
-                sample_batch_agent,
-                last_r,
-                policy.config["gamma"],
-                policy.config["lambda"],
-                use_gae=policy.config["use_gae"],
-                use_critic=policy.config.get("use_critic", True),
-            )
+        sample_batch_agent = compute_advantages(
+            sample_batch_agent,
+            last_r,
+            policy.config["gamma"],
+            policy.config["lambda"],
+            use_gae=policy.config["use_gae"],
+            use_critic=policy.config.get("use_critic", True),
         )
 
-    # Now take original samplebatch and overwrite following elements as a concatenation of these
-    for k in [
-        SampleBatch.REWARDS,
-        SampleBatch.VF_PREDS,
-        Postprocessing.ADVANTAGES,
-        Postprocessing.VALUE_TARGETS,
-    ]:
-        sample_batch[k] = np.stack([b[k] for b in batches], axis=-1)
+        for k in keys_to_overwirte:
+            sample_batch[k][:, agent_index] = sample_batch_agent[k]
 
     return sample_batch
 

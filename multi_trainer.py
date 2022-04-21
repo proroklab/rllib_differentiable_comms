@@ -264,9 +264,9 @@ def ppo_surrogate_loss(
             }
         )
 
-    model.tower_stats["total_loss"] = torch.sum(
-        torch.stack([o["total_loss"] for o in loss_data])
-    )
+    total_loss = torch.sum(torch.stack([o["total_loss"] for o in loss_data]))
+
+    model.tower_stats["total_loss"] = total_loss
     model.tower_stats["mean_policy_loss"] = torch.mean(
         torch.stack([o["mean_policy_loss"] for o in loss_data])
     )
@@ -283,7 +283,7 @@ def ppo_surrogate_loss(
         torch.stack([o["mean_kl"] for o in loss_data])
     )
 
-    return torch.sum(torch.stack([o["total_loss"] for o in loss_data]))
+    return total_loss
 
 
 class MultiPPOTorchPolicy(PPOTorchPolicy, ABC):

@@ -98,15 +98,17 @@ def compute_gae_for_sample_batch(
         Postprocessing.VALUE_TARGETS,
     ]
 
+    original_batch = sample_batch.copy()
+
     # We prepare the sample batch to contain the agent batches
     for k in keys_to_overwirte:
-        sample_batch[k] = np.zeros((len(sample_batch), n_agents))
+        sample_batch[k] = np.zeros((len(original_batch), n_agents))
 
     # Create the sample_batch for each agent
     action_index = 0
     for key, action_space in zip(samplebatch_infos_rewards.keys(), policy.action_space):
         agent_index = int(key)
-        sample_batch_agent = sample_batch.copy()
+        sample_batch_agent = original_batch.copy()
         sample_batch_agent[SampleBatch.REWARDS] = samplebatch_infos_rewards[key]
         if isinstance(action_space, gym.spaces.box.Box):
             assert len(action_space.shape) == 1
@@ -118,15 +120,15 @@ def compute_gae_for_sample_batch(
                 "Expect gym.spaces.box or gym.spaces.discrete action space"
             )
 
-        sample_batch_agent[SampleBatch.ACTIONS] = sample_batch[SampleBatch.ACTIONS][
+        sample_batch_agent[SampleBatch.ACTIONS] = original_batch[SampleBatch.ACTIONS][
             :, action_index : (action_index + a_w)
         ]
-        sample_batch_agent[SampleBatch.VF_PREDS] = sample_batch[SampleBatch.VF_PREDS][
+        sample_batch_agent[SampleBatch.VF_PREDS] = original_batch[SampleBatch.VF_PREDS][
             :, agent_index
         ]
         action_index += a_w
         # Trajectory is actually complete -> last r=0.0.
-        if sample_batch[SampleBatch.DONES][-1]:
+        if original_batch[SampleBatch.DONES][-1]:
             last_r = 0.0
         # Trajectory has been truncated -> last r=VF estimate of last obs.
         else:
@@ -134,7 +136,7 @@ def compute_gae_for_sample_batch(
             # requirements. It's a single-timestep (last one in trajectory)
             # input_dict.
             # Create an input dict according to the Model's requirements.
-            input_dict = sample_batch.get_single_step_input_dict(
+            input_dict = original_batch.get_single_step_input_dict(
                 policy.model.view_requirements, index="last"
             )
             all_values = policy._value(**input_dict)

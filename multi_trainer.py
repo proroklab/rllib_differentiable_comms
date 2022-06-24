@@ -268,22 +268,23 @@ def ppo_surrogate_loss(
             }
         )
 
-    total_loss = torch.mean(torch.stack([o["total_loss"] for o in loss_data]))
+    aggregation = torch.mean
+    total_loss = aggregation(torch.stack([o["total_loss"] for o in loss_data]))
 
     model.tower_stats["total_loss"] = total_loss
-    model.tower_stats["mean_policy_loss"] = torch.mean(
+    model.tower_stats["mean_policy_loss"] = aggregation(
         torch.stack([o["mean_policy_loss"] for o in loss_data])
     )
-    model.tower_stats["mean_vf_loss"] = torch.mean(
+    model.tower_stats["mean_vf_loss"] = aggregation(
         torch.stack([o["mean_vf_loss"] for o in loss_data])
     )
     model.tower_stats["vf_explained_var"] = explained_variance(
         train_batch[Postprocessing.VALUE_TARGETS], value_fn_out
     )
-    model.tower_stats["mean_entropy"] = torch.mean(
+    model.tower_stats["mean_entropy"] = aggregation(
         torch.stack([o["mean_entropy"] for o in loss_data])
     )
-    model.tower_stats["mean_kl_loss"] = torch.mean(
+    model.tower_stats["mean_kl_loss"] = aggregation(
         torch.stack([o["mean_kl"] for o in loss_data])
     )
 

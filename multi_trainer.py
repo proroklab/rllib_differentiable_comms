@@ -17,7 +17,6 @@ from ray.rllib.policy.policy import Policy
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.numpy import convert_to_numpy
 from ray.rllib.utils.torch_utils import explained_variance, sequence_mask
 from ray.rllib.utils.typing import AgentID, TensorType
 
@@ -266,7 +265,7 @@ def ppo_surrogate_loss(
             }
         )
 
-    total_loss = torch.sum(torch.stack([o["total_loss"] for o in loss_data]))
+    total_loss = torch.mean(torch.stack([o["total_loss"] for o in loss_data]))
 
     model.tower_stats["total_loss"] = total_loss
     model.tower_stats["mean_policy_loss"] = torch.mean(

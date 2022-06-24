@@ -109,14 +109,16 @@ def compute_gae_for_sample_batch(
         agent_index = int(key)
         sample_batch_agent = original_batch.copy()
         sample_batch_agent[SampleBatch.REWARDS] = samplebatch_infos_rewards[key]
-        if isinstance(action_space, gym.spaces.box.Box):
+        if isinstance(action_space, gym.spaces.Box):
             assert len(action_space.shape) == 1
             a_w = action_space.shape[0]
-        elif isinstance(action_space, gym.spaces.discrete.Discrete):
+        elif isinstance(action_space, gym.spaces.Discrete):
             a_w = 1
+        elif isinstance(action_space, gym.spaces.MultiDiscrete):
+            a_w = int(np.prod(action_space.shape))
         else:
             raise InvalidActionSpace(
-                "Expect gym.spaces.box or gym.spaces.discrete action space"
+                "Expect gym.spaces.Box, gym.spaces.Discrete or gym.spaces.MultiDiscrete action space for each agent"
             )
 
         sample_batch_agent[SampleBatch.ACTIONS] = original_batch[SampleBatch.ACTIONS][
@@ -175,6 +177,7 @@ def ppo_surrogate_loss(
             of loss tensors.
     """
     logits, state = model(train_batch)
+    # logits has shape (BATCH, num_agents * num_outputs_per_agent)
     curr_action_dist = dist_class(logits, model)
 
     # RNN case: Mask away 0-padded chunks at end of time axis.
@@ -198,6 +201,7 @@ def ppo_surrogate_loss(
         reduce_mean_valid = torch.mean
 
     prev_action_dist = dist_class(train_batch[SampleBatch.ACTION_DIST_INPUTS], model)
+    # train_batch[SampleBatch.ACTIONS] has shape (BATCH, num_agents * action_size)
     logps = curr_action_dist.logp(train_batch[SampleBatch.ACTIONS])
 
     curr_entropies = curr_action_dist.entropy()
@@ -243,8 +247,7 @@ def ppo_surrogate_loss(
             - policy.entropy_coeff * curr_entropies[:, i]
         )
 
-        # Add mean_kl_loss (already processed through `reduce_mean_valid`),
-        # if necessary.
+        # Add mean_kl_loss if necessary.
         if use_kl:
             total_loss += policy.kl_coeff * action_kl[:, i]
 

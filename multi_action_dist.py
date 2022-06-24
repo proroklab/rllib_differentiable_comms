@@ -1,10 +1,12 @@
 import gym
+import numpy as np
 import tree
 from ray.rllib.models.torch.torch_action_dist import (
     TorchMultiActionDistribution,
     TorchCategorical,
     TorchBeta,
     TorchDiagGaussian,
+    TorchMultiCategorical,
 )
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.annotations import override
@@ -67,7 +69,7 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
         for agent_action_space, agent_inputs in zip(
             self.action_space_struct, split_inputs
         ):
-            if isinstance(agent_action_space, gym.spaces.box.Box):
+            if isinstance(agent_action_space, gym.spaces.Box):
                 assert len(agent_action_space.shape) == 1
                 if model.use_beta:
                     self.flat_child_distributions.append(
@@ -82,38 +84,52 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
                     self.flat_child_distributions.append(
                         TorchDiagGaussian(agent_inputs, model)
                     )
-            elif isinstance(agent_action_space, gym.spaces.discrete.Discrete):
+            elif isinstance(agent_action_space, gym.spaces.Discrete):
                 self.flat_child_distributions.append(
                     TorchCategorical(agent_inputs, model)
                 )
+            elif isinstance(agent_action_space, gym.spaces.MultiDiscrete):
+                self.flat_child_distributions.append(
+                    TorchMultiCategorical(
+                        agent_inputs, model, action_space=agent_action_space
+                    )
+                )
             else:
                 raise InvalidActionSpace(
-                    "Expect gym.spaces.box or gym.spaces.discrete action space for each agent"
+                    "Expect gym.spaces.Box, gym.spaces.Discrete or gym.spaces.MultiDiscrete action space for each agent"
                 )
 
     @override(TorchMultiActionDistribution)
     def logp(self, x):
-        # x.shape = (BATCH, num_agents)
+        if isinstance(x, np.ndarray):
+            x = torch.Tensor(x)
+        assert isinstance(x, torch.Tensor)
+        # x.shape = (BATCH, num_agents * action_size)
         logps = []
         assert len(self.flat_child_distributions) == len(self.action_space_struct)
         i = 0
         for agent_distribution, agent_action_space in zip(
             self.flat_child_distributions, self.action_space_struct
         ):
-            if isinstance(agent_action_space, gym.spaces.box.Box):
-                # print(f"Agent action space shape: {action_space.shape}")
-                a_w = agent_action_space.shape[0]
-                x_agent = x[:, i : (i + a_w)]
-                i += a_w
-            elif isinstance(agent_action_space, gym.spaces.discrete.Discrete):
+            if isinstance(agent_distribution, TorchCategorical):
+                a_size = 1
                 x_agent = x[:, i].int()
-                i += 1
+            elif isinstance(agent_distribution, TorchMultiCategorical):
+                a_size = int(np.prod(dist.action_space.shape))
+                x_agent = x[:, i : (i + a_size)].int()
             else:
-                raise InvalidActionSpace(
-                    "Expect gym.spaces.box or gym.spaces.discrete action space for each agent"
-                )
+                sample = agent_distribution.sample()
+                # Cover Box(shape=()) case.
+                if len(sample.shape) == 1:
+                    a_size = 1
+                else:
+                    a_size = sample.size()[1]
+                x_agent = x[:, i : (i + a_size)]
+
+            i += a_size
             agent_logps = agent_distribution.logp(x_agent)
             if len(agent_logps.shape) > 1:
+                assert False
                 agent_logps = torch.sum(agent_logps, dim=1)
 
             # agent_logps shape (BATCH_SIZE, 1)
@@ -128,6 +144,7 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
         for d in self.flat_child_distributions:
             agent_entropy = d.entropy()
             if len(agent_entropy.shape) > 1:
+                assert False
                 agent_entropy = torch.sum(agent_entropy, dim=1)
             entropies.append(agent_entropy)
         return torch.stack(entropies, axis=-1)
@@ -144,6 +161,7 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
         for d, o in zip(self.flat_child_distributions, other.flat_child_distributions):
             agent_kl = d.kl(o)
             if len(agent_kl.shape) > 1:
+                assert False
                 agent_kl = torch.sum(agent_kl, dim=1)
             kls.append(agent_kl)
         return torch.stack(

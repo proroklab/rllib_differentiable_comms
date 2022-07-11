@@ -129,7 +129,6 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
             i += a_size
             agent_logps = agent_distribution.logp(x_agent)
             if len(agent_logps.shape) > 1:
-                assert False
                 agent_logps = torch.sum(agent_logps, dim=1)
 
             # agent_logps shape (BATCH_SIZE, 1)
@@ -144,7 +143,6 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
         for d in self.flat_child_distributions:
             agent_entropy = d.entropy()
             if len(agent_entropy.shape) > 1:
-                assert False
                 agent_entropy = torch.sum(agent_entropy, dim=1)
             entropies.append(agent_entropy)
         return torch.stack(entropies, axis=-1)
@@ -161,7 +159,6 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
         for d, o in zip(self.flat_child_distributions, other.flat_child_distributions):
             agent_kl = d.kl(o)
             if len(agent_kl.shape) > 1:
-                assert False
                 agent_kl = torch.sum(agent_kl, dim=1)
             kls.append(agent_kl)
         return torch.stack(

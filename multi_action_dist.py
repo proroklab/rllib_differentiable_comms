@@ -108,14 +108,12 @@ class TorchHomogeneousMultiActionDistribution(TorchMultiActionDistribution):
         logps = []
         assert len(self.flat_child_distributions) == len(self.action_space_struct)
         i = 0
-        for agent_distribution, agent_action_space in zip(
-            self.flat_child_distributions, self.action_space_struct
-        ):
+        for agent_distribution in self.flat_child_distributions:
             if isinstance(agent_distribution, TorchCategorical):
                 a_size = 1
                 x_agent = x[:, i].int()
             elif isinstance(agent_distribution, TorchMultiCategorical):
-                a_size = int(np.prod(dist.action_space.shape))
+                a_size = int(np.prod(agent_distribution.action_space.shape))
                 x_agent = x[:, i : (i + a_size)].int()
             else:
                 sample = agent_distribution.sample()

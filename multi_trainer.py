@@ -15,9 +15,13 @@ from ray.rllib.models import ActionDistribution
 from ray.rllib.models.modelv2 import ModelV2
 from ray.rllib.policy.policy import Policy
 from ray.rllib.policy.sample_batch import SampleBatch
-from ray.rllib.utils.annotations import override
+from ray.rllib.utils.annotations import override, DeveloperAPI
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.torch_utils import explained_variance, sequence_mask
+from ray.rllib.utils.torch_utils import (
+    explained_variance,
+    sequence_mask,
+    convert_to_torch_tensor,
+)
 from ray.rllib.utils.typing import AgentID, TensorType
 
 torch, nn = try_import_torch()
@@ -294,6 +298,35 @@ def ppo_surrogate_loss(
 class MultiPPOTorchPolicy(PPOTorchPolicy, ABC):
     def __init__(self, observation_space, action_space, config):
         super().__init__(observation_space, action_space, config)
+
+    @override(Policy)
+    @DeveloperAPI
+    def set_state(self, state: dict) -> None:
+        # Set optimizer vars first.
+        optimizer_vars = state.get("_optimizer_variables", None)
+        if optimizer_vars:
+            assert len(optimizer_vars) == len(self._optimizers)
+            for o, s in zip(self._optimizers, optimizer_vars):
+
+                # Fix
+                for v in s["param_groups"]:
+                    if "foreach" in v.keys():
+                        v["foreach"] = False if v["foreach"] is None else v["foreach"]
+                for v in s["state"].values():
+                    if "momentum_buffer" in v.keys():
+                        v["momentum_buffer"] = (
+                            False
+                            if v["momentum_buffer"] is None
+                            else v["momentum_buffer"]
+                        )
+
+                optim_state_dict = convert_to_torch_tensor(s, device=self.device)
+                o.load_state_dict(optim_state_dict)
+        # Set exploration's state.
+        if hasattr(self, "exploration") and "_exploration_state" in state:
+            self.exploration.set_state(state=state["_exploration_state"])
+        # Then the Policy's (NN) weights.
+        super().set_state(state)
 
     @override(PPOTorchPolicy)
     def loss(self, model, dist_class, train_batch):

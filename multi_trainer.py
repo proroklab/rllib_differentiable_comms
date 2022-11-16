@@ -7,20 +7,28 @@ from typing import Dict, List, Optional, Type, Union
 
 import gym
 import numpy as np
+import ray
 from ray.rllib.agents.ppo import PPOTrainer
-from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy
+from ray.rllib.algorithms.ppo import PPOTorchPolicy
+from ray.rllib.algorithms.ppo.ppo_tf_policy import validate_config
 from ray.rllib.evaluation.episode import MultiAgentEpisode
 from ray.rllib.evaluation.postprocessing import Postprocessing, compute_advantages
 from ray.rllib.models import ActionDistribution
 from ray.rllib.models.modelv2 import ModelV2
 from ray.rllib.policy.policy import Policy
 from ray.rllib.policy.sample_batch import SampleBatch
-from ray.rllib.utils.annotations import override, DeveloperAPI
+from ray.rllib.policy.torch_mixins import (
+    LearningRateSchedule,
+    KLCoeffMixin,
+    EntropyCoeffSchedule,
+)
+from ray.rllib.policy.torch_policy_v2 import TorchPolicyV2
+from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.torch_utils import (
     explained_variance,
     sequence_mask,
-    convert_to_torch_tensor,
+    warn_if_infinite_kl_divergence,
 )
 from ray.rllib.utils.typing import AgentID, TensorType
 
@@ -211,7 +219,7 @@ def ppo_surrogate_loss(
     curr_entropies = curr_action_dist.entropy()
     use_kl = policy.config["kl_coeff"] > 0.0
 
-    if use_kl > 0.0:
+    if use_kl:
         action_kl = prev_action_dist.kl(curr_action_dist)
     else:
         action_kl = torch.tensor(0.0, device=logps.device)
@@ -253,13 +261,21 @@ def ppo_surrogate_loss(
 
         # Add mean_kl_loss if necessary.
         if use_kl:
-            total_loss += policy.kl_coeff * action_kl[:, i]
+            mean_kl_loss = reduce_mean_valid(action_kl[:, i])
+            total_loss += policy.kl_coeff * mean_kl_loss
+            # TODO smorad: should we do anything besides warn? Could discard KL term
+            # for this update
+            warn_if_infinite_kl_divergence(policy, mean_kl_loss)
+        else:
+            mean_kl_loss = torch.tensor(0.0, device=logp_ratio.device)
 
         total_loss = reduce_mean_valid(total_loss)
         mean_policy_loss = reduce_mean_valid(-surrogate_loss)
         mean_vf_loss = reduce_mean_valid(vf_loss_clipped)
         mean_entropy = reduce_mean_valid(curr_entropies[:, i])
-        mean_kl = reduce_mean_valid(action_kl[:, i]) if use_kl else torch.tensor([0.0])
+        vf_explained_var = explained_variance(
+            train_batch[Postprocessing.VALUE_TARGETS][..., i], value_fn_out[..., i]
+        )
 
         # Store stats in policy for stats_fn.
         loss_data.append(
@@ -268,7 +284,8 @@ def ppo_surrogate_loss(
                 "mean_policy_loss": mean_policy_loss,
                 "mean_vf_loss": mean_vf_loss,
                 "mean_entropy": mean_entropy,
-                "mean_kl": mean_kl,
+                "mean_kl": mean_kl_loss,
+                "vf_explained_var": vf_explained_var,
             }
         )
 
@@ -282,8 +299,8 @@ def ppo_surrogate_loss(
     model.tower_stats["mean_vf_loss"] = aggregation(
         torch.stack([o["mean_vf_loss"] for o in loss_data])
     )
-    model.tower_stats["vf_explained_var"] = explained_variance(
-        train_batch[Postprocessing.VALUE_TARGETS], value_fn_out
+    model.tower_stats["vf_explained_var"] = aggregation(
+        torch.stack([o["vf_explained_var"] for o in loss_data])
     )
     model.tower_stats["mean_entropy"] = aggregation(
         torch.stack([o["mean_entropy"] for o in loss_data])
@@ -295,38 +312,72 @@ def ppo_surrogate_loss(
     return total_loss
 
 
-class MultiPPOTorchPolicy(PPOTorchPolicy, ABC):
+class MultiAgentValueNetworkMixin:
+    """Assigns the `_value()` method to a TorchPolicy.
+
+    This way, Policy can call `_value()` to get the current VF estimate on a
+    single(!) observation (as done in `postprocess_trajectory_fn`).
+    Note: When doing this, an actual forward pass is being performed.
+    This is different from only calling `model.value_function()`, where
+    the result of the most recent forward pass is being used to return an
+    already calculated tensor.
+    """
+
+    def __init__(self, config):
+        # When doing GAE, we need the value function estimate on the
+        # observation.
+        if config["use_gae"]:
+            # Input dict is provided to us automatically via the Model's
+            # requirements. It's a single-timestep (last one in trajectory)
+            # input_dict.
+            def value(**input_dict):
+                """This is exactly the as in PPOTorchPolicy,
+                but that one calls .item() on self.model.value_function()[0],
+                which will not work for us since our value function returns
+                multiple values. Instead, we call .item() in
+                compute_gae_for_sample_batch above.
+                """
+                input_dict = SampleBatch(input_dict)
+                input_dict = self._lazy_tensor_dict(input_dict)
+                model_out, _ = self.model(input_dict)
+                # [0] = remove the batch dim.
+                return self.model.value_function()[0]
+                # When not doing GAE, we do not require the value function's output.
+
+        # When not doing GAE, we do not require the value function's output.
+        else:
+
+            def value(*args, **kwargs):
+                return 0.0
+
+        self._value = value
+
+
+class MultiPPOTorchPolicy(PPOTorchPolicy, MultiAgentValueNetworkMixin):
     def __init__(self, observation_space, action_space, config):
-        super().__init__(observation_space, action_space, config)
+        config = dict(ray.rllib.algorithms.ppo.ppo.PPOConfig().to_dict(), **config)
+        # TODO: Move into Policy API, if needed at all here. Why not move this into
+        #  `PPOConfig`?.
+        validate_config(config)
 
-    @override(Policy)
-    @DeveloperAPI
-    def set_state(self, state: dict) -> None:
-        # Set optimizer vars first.
-        optimizer_vars = state.get("_optimizer_variables", None)
-        if optimizer_vars:
-            assert len(optimizer_vars) == len(self._optimizers)
-            for o, s in zip(self._optimizers, optimizer_vars):
+        TorchPolicyV2.__init__(
+            self,
+            observation_space,
+            action_space,
+            config,
+            max_seq_len=config["model"]["max_seq_len"],
+        )
 
-                # Fix
-                for v in s["param_groups"]:
-                    if "foreach" in v.keys():
-                        v["foreach"] = False if v["foreach"] is None else v["foreach"]
-                for v in s["state"].values():
-                    if "momentum_buffer" in v.keys():
-                        v["momentum_buffer"] = (
-                            False
-                            if v["momentum_buffer"] is None
-                            else v["momentum_buffer"]
-                        )
+        # Only difference from ray code
+        MultiAgentValueNetworkMixin.__init__(self, config)
+        LearningRateSchedule.__init__(self, config["lr"], config["lr_schedule"])
+        EntropyCoeffSchedule.__init__(
+            self, config["entropy_coeff"], config["entropy_coeff_schedule"]
+        )
+        KLCoeffMixin.__init__(self, config)
 
-                optim_state_dict = convert_to_torch_tensor(s, device=self.device)
-                o.load_state_dict(optim_state_dict)
-        # Set exploration's state.
-        if hasattr(self, "exploration") and "_exploration_state" in state:
-            self.exploration.set_state(state=state["_exploration_state"])
-        # Then the Policy's (NN) weights.
-        super().set_state(state)
+        # TODO: Don't require users to call this manually.
+        self._initialize_loss_from_dummy_batch()
 
     @override(PPOTorchPolicy)
     def loss(self, model, dist_class, train_batch):
@@ -344,29 +395,6 @@ class MultiPPOTorchPolicy(PPOTorchPolicy, ABC):
             return compute_gae_for_sample_batch(
                 self, sample_batch, other_agent_batches, episode
             )
-
-    @override(PPOTorchPolicy)
-    def _value(self, **input_dict):
-        """This is exactly the as in PPOTorchPolicy,
-        but that one calls .item() on self.model.value_function()[0],
-        which will not work for us since our value function returns
-        multiple values. Instead, we call .item() in
-        compute_gae_for_sample_batch above.
-        """
-
-        # When doing GAE, we need the value function estimate on the
-        # observation.
-        if self.config["use_gae"]:
-            # Input dict is provided to us automatically via the Model's
-            # requirements. It's a single-timestep (last one in trajectory)
-            # input_dict.
-            input_dict = self._lazy_tensor_dict(input_dict)
-            model_out, _ = self.model(input_dict)
-            # [0] = remove the batch dim.
-            return self.model.value_function()[0]
-        # When not doing GAE, we do not require the value function's output.
-        else:
-            return 0.0
 
 
 class MultiPPOTrainer(PPOTrainer, ABC):

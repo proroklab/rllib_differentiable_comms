@@ -16,7 +16,7 @@ from ray.rllib.evaluation.postprocessing import Postprocessing, compute_advantag
 from ray.rllib.models import ActionDistribution
 from ray.rllib.models.modelv2 import ModelV2
 from ray.rllib.policy.policy import Policy
-from ray.rllib.policy.sample_batch import SampleBatch
+from ray.rllib.policy.sample_batch import SampleBatch, concat_samples
 from ray.rllib.policy.torch_mixins import (
     LearningRateSchedule,
     KLCoeffMixin,
@@ -88,7 +88,7 @@ def compute_gae_for_sample_batch(
         # sample_batch[SampleBatch.INFOS] = list of len ROLLOUT_SIZE of which every element is
         # {'rewards': {0: -0.077463925, 1: -0.0029145998, 2: -0.08233316}} if there are 3 agents
 
-        samplebatch_infos_rewards = SampleBatch.concat_samples(
+        samplebatch_infos_rewards = concat_samples(
             [
                 SampleBatch({str(k): [v] for k, v in s["rewards"].items()})
                 for s in sample_batch[SampleBatch.INFOS]

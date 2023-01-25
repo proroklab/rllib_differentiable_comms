@@ -1,9 +1,13 @@
 """
 PyTorch's policy class used for PPO.
 """
+#  Copyright (c) 2023.
+#  ProrokLab (https://www.proroklab.org/)
+#  All rights reserved.
+
 import logging
 from abc import ABC
-from typing import Dict, List, Optional, Type, Union
+from typing import Dict, Optional, Union, List, Type
 
 import gym
 import numpy as np
@@ -11,10 +15,9 @@ import ray
 from ray.rllib.agents.ppo import PPOTrainer
 from ray.rllib.algorithms.ppo import PPOTorchPolicy
 from ray.rllib.algorithms.ppo.ppo_tf_policy import validate_config
-from ray.rllib.evaluation.episode import MultiAgentEpisode
+from ray.rllib.evaluation import Episode
 from ray.rllib.evaluation.postprocessing import Postprocessing, compute_advantages
-from ray.rllib.models import ActionDistribution
-from ray.rllib.models.modelv2 import ModelV2
+from ray.rllib.models import ModelV2, ActionDistribution
 from ray.rllib.policy.policy import Policy
 from ray.rllib.policy.sample_batch import SampleBatch, concat_samples
 from ray.rllib.policy.torch_mixins import (
@@ -26,9 +29,9 @@ from ray.rllib.policy.torch_policy_v2 import TorchPolicyV2
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.torch_utils import (
+    warn_if_infinite_kl_divergence,
     explained_variance,
     sequence_mask,
-    warn_if_infinite_kl_divergence,
 )
 from ray.rllib.utils.typing import AgentID, TensorType
 
@@ -47,7 +50,7 @@ def compute_gae_for_sample_batch(
     policy: Policy,
     sample_batch: SampleBatch,
     other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
-    episode: Optional[MultiAgentEpisode] = None,
+    episode: Optional[Episode] = None,
 ) -> SampleBatch:
     """Adds GAE (generalized advantage estimations) to a trajectory.
     The trajectory contains only data from one episode and from one agent.
@@ -75,10 +78,16 @@ def compute_gae_for_sample_batch(
         # The trajectory view API will pass populate the info dict with a np.zeros((ROLLOUT_SIZE,))
         # array in the first call, in that case the dtype will be float32, and we
         # ignore it by assignining it to all agents
-        samplebatch_infos_rewards = {
-            str(agent_index): sample_batch[SampleBatch.INFOS]
-            for agent_index in range(n_agents)
-        }
+        samplebatch_infos_rewards = concat_samples(
+            [
+                SampleBatch(
+                    {
+                        str(i): sample_batch[SampleBatch.REWARDS].copy()
+                        for i in range(n_agents)
+                    }
+                )
+            ]
+        )
 
     else:
         #  For regular calls, we extract the rewards from the info
@@ -90,7 +99,7 @@ def compute_gae_for_sample_batch(
 
         samplebatch_infos_rewards = concat_samples(
             [
-                SampleBatch({str(k): [v] for k, v in s["rewards"].items()})
+                SampleBatch({str(k): [np.float32(v)] for k, v in s["rewards"].items()})
                 for s in sample_batch[SampleBatch.INFOS]
                 # s = {'rewards': {0: -0.077463925, 1: -0.0029145998, 2: -0.08233316}} if there are 3 agents
             ]
@@ -113,7 +122,7 @@ def compute_gae_for_sample_batch(
 
     # We prepare the sample batch to contain the agent batches
     for k in keys_to_overwirte:
-        sample_batch[k] = np.zeros((len(original_batch), n_agents))
+        sample_batch[k] = np.zeros((len(original_batch), n_agents), dtype=np.float32)
 
     # Create the sample_batch for each agent
     action_index = 0
@@ -153,7 +162,11 @@ def compute_gae_for_sample_batch(
                 policy.model.view_requirements, index="last"
             )
             all_values = policy._value(**input_dict)
-            last_r = all_values[agent_index].item()
+            last_r = (
+                all_values[agent_index].item()
+                if policy.config["use_gae"]
+                else all_values
+            )
 
         # Adds the policy logits, VF preds, and advantages to the batch,
         # using GAE ("generalized advantage estimation") or not.
@@ -214,31 +227,37 @@ def ppo_surrogate_loss(
 
     prev_action_dist = dist_class(train_batch[SampleBatch.ACTION_DIST_INPUTS], model)
     # train_batch[SampleBatch.ACTIONS] has shape (BATCH, num_agents * action_size)
-    logps = curr_action_dist.logp(train_batch[SampleBatch.ACTIONS])
+    logp_ratio = torch.exp(
+        curr_action_dist.logp(train_batch[SampleBatch.ACTIONS])
+        - train_batch[SampleBatch.ACTION_LOGP]
+    )
 
-    curr_entropies = curr_action_dist.entropy()
     use_kl = policy.config["kl_coeff"] > 0.0
-
     if use_kl:
         action_kl = prev_action_dist.kl(curr_action_dist)
     else:
-        action_kl = torch.tensor(0.0, device=logps.device)
+        action_kl = torch.tensor(0.0, device=logp_ratio.device)
+
+    curr_entropies = curr_action_dist.entropy()
 
     # Compute a value function loss.
     if policy.config["use_critic"]:
         value_fn_out = model.value_function()
     else:
-        value_fn_out = 0.0
+        value_fn_out = torch.tensor(0.0, device=logp_ratio.device)
 
     loss_data = []
-    for i in range(len(train_batch[SampleBatch.VF_PREDS][0])):
-        logp_ratio = torch.exp(logps[:, i] - train_batch[SampleBatch.ACTION_LOGP][:, i])
+    n_agents = len(policy.action_space)
+    for i in range(n_agents):
 
-        eps = policy.config["clip_param"]
-        surrogate = torch.clamp(logp_ratio, 1 - eps, 1 + eps)
         surrogate_loss = torch.min(
-            train_batch[Postprocessing.ADVANTAGES][..., i] * logp_ratio,
-            train_batch[Postprocessing.ADVANTAGES][..., i] * surrogate,
+            train_batch[Postprocessing.ADVANTAGES][..., i] * logp_ratio[..., i],
+            train_batch[Postprocessing.ADVANTAGES][..., i]
+            * torch.clamp(
+                logp_ratio[..., i],
+                1 - policy.config["clip_param"],
+                1 + policy.config["clip_param"],
+            ),
         )
 
         # Compute a value function loss.
@@ -249,19 +268,21 @@ def ppo_surrogate_loss(
                 2.0,
             )
             vf_loss_clipped = torch.clamp(vf_loss, 0, policy.config["vf_clip_param"])
+            mean_vf_loss = reduce_mean_valid(vf_loss_clipped)
         # Ignore the value function.
         else:
-            vf_loss_clipped = 0.0
+            agent_value_fn_out = torch.tensor(0.0).to(surrogate_loss.device)
+            vf_loss_clipped = mean_vf_loss = torch.tensor(0.0).to(surrogate_loss.device)
 
         total_loss = (
             -surrogate_loss
             + policy.config["vf_loss_coeff"] * vf_loss_clipped
-            - policy.entropy_coeff * curr_entropies[:, i]
+            - policy.entropy_coeff * curr_entropies[..., i]
         )
 
         # Add mean_kl_loss if necessary.
         if use_kl:
-            mean_kl_loss = reduce_mean_valid(action_kl[:, i])
+            mean_kl_loss = reduce_mean_valid(action_kl[..., i])
             total_loss += policy.kl_coeff * mean_kl_loss
             # TODO smorad: should we do anything besides warn? Could discard KL term
             # for this update
@@ -271,10 +292,9 @@ def ppo_surrogate_loss(
 
         total_loss = reduce_mean_valid(total_loss)
         mean_policy_loss = reduce_mean_valid(-surrogate_loss)
-        mean_vf_loss = reduce_mean_valid(vf_loss_clipped)
-        mean_entropy = reduce_mean_valid(curr_entropies[:, i])
+        mean_entropy = reduce_mean_valid(curr_entropies[..., i])
         vf_explained_var = explained_variance(
-            train_batch[Postprocessing.VALUE_TARGETS][..., i], value_fn_out[..., i]
+            train_batch[Postprocessing.VALUE_TARGETS][..., i], agent_value_fn_out
         )
 
         # Store stats in policy for stats_fn.

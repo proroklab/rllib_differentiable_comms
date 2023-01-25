@@ -124,44 +124,27 @@ def compute_gae_for_sample_batch(
     for k in keys_to_overwirte:
         sample_batch[k] = np.zeros((len(original_batch), n_agents), dtype=np.float32)
 
+    if original_batch[SampleBatch.DONES][-1]:
+        all_values = None
+    else:
+        input_dict = original_batch.get_single_step_input_dict(
+            policy.model.view_requirements, index="last"
+        )
+        all_values = policy._value(**input_dict)
+
     # Create the sample_batch for each agent
-    action_index = 0
-    for key, action_space in zip(samplebatch_infos_rewards.keys(), policy.action_space):
+    for key in samplebatch_infos_rewards.keys():
         agent_index = int(key)
         sample_batch_agent = original_batch.copy()
         sample_batch_agent[SampleBatch.REWARDS] = samplebatch_infos_rewards[key]
-        if isinstance(action_space, gym.spaces.Box):
-            assert len(action_space.shape) == 1
-            a_w = action_space.shape[0]
-        elif isinstance(action_space, gym.spaces.Discrete):
-            a_w = 1
-        elif isinstance(action_space, gym.spaces.MultiDiscrete):
-            a_w = int(np.prod(action_space.shape))
-        else:
-            raise InvalidActionSpace(
-                "Expect gym.spaces.Box, gym.spaces.Discrete or gym.spaces.MultiDiscrete action space for each agent"
-            )
-
-        sample_batch_agent[SampleBatch.ACTIONS] = original_batch[SampleBatch.ACTIONS][
-            :, action_index : (action_index + a_w)
-        ]
         sample_batch_agent[SampleBatch.VF_PREDS] = original_batch[SampleBatch.VF_PREDS][
             :, agent_index
         ]
-        action_index += a_w
-        # Trajectory is actually complete -> last r=0.0.
-        if original_batch[SampleBatch.DONES][-1]:
+
+        if all_values is None:
             last_r = 0.0
         # Trajectory has been truncated -> last r=VF estimate of last obs.
         else:
-            # Input dict is provided to us automatically via the Model's
-            # requirements. It's a single-timestep (last one in trajectory)
-            # input_dict.
-            # Create an input dict according to the Model's requirements.
-            input_dict = original_batch.get_single_step_input_dict(
-                policy.model.view_requirements, index="last"
-            )
-            all_values = policy._value(**input_dict)
             last_r = (
                 all_values[agent_index].item()
                 if policy.config["use_gae"]

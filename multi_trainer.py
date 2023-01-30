@@ -7,19 +7,34 @@ PyTorch's policy class used for PPO.
 
 import logging
 from abc import ABC
-from typing import Dict, Optional, Union, List, Type
+from typing import Dict
+from typing import List, Optional, Union
+from typing import Type
 
 import gym
 import numpy as np
 import ray
 from ray.rllib.agents.ppo import PPOTrainer
+from ray.rllib.algorithms.algorithm import Algorithm
 from ray.rllib.algorithms.ppo import PPOTorchPolicy
 from ray.rllib.algorithms.ppo.ppo_tf_policy import validate_config
 from ray.rllib.evaluation import Episode
 from ray.rllib.evaluation.postprocessing import Postprocessing, compute_advantages
+from ray.rllib.execution import synchronous_parallel_sample
+from ray.rllib.execution.common import (
+    _check_sample_batch_type,
+)
+from ray.rllib.execution.train_ops import (
+    train_one_step,
+    multi_gpu_train_one_step,
+)
 from ray.rllib.models import ModelV2, ActionDistribution
 from ray.rllib.policy.policy import Policy
-from ray.rllib.policy.sample_batch import SampleBatch, concat_samples
+from ray.rllib.policy.sample_batch import (
+    SampleBatch,
+    DEFAULT_POLICY_ID,
+    concat_samples,
+)
 from ray.rllib.policy.torch_mixins import (
     LearningRateSchedule,
     KLCoeffMixin,
@@ -28,12 +43,19 @@ from ray.rllib.policy.torch_mixins import (
 from ray.rllib.policy.torch_policy_v2 import TorchPolicyV2
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
+from ray.rllib.utils.metrics import (
+    NUM_AGENT_STEPS_SAMPLED,
+    NUM_ENV_STEPS_SAMPLED,
+    SYNCH_WORKER_WEIGHTS_TIMER,
+)
+from ray.rllib.utils.metrics.learner_info import LEARNER_STATS_KEY
 from ray.rllib.utils.torch_utils import (
     warn_if_infinite_kl_divergence,
     explained_variance,
     sequence_mask,
 )
-from ray.rllib.utils.typing import AgentID, TensorType
+from ray.rllib.utils.typing import AgentID, TensorType, ResultDict
+from ray.rllib.utils.typing import PolicyID, SampleBatchType
 
 torch, nn = try_import_torch()
 
@@ -44,6 +66,41 @@ class InvalidActionSpace(Exception):
     """Raised when the action space is invalid"""
 
     pass
+
+
+def standardized(array: np.ndarray):
+    """Normalize the values in an array.
+
+    Args:
+        array (np.ndarray): Array of values to normalize.
+
+    Returns:
+        array with zero mean and unit standard deviation.
+    """
+    return (array - array.mean(axis=-1, keepdims=True)) / array.std(
+        axis=-1, keepdims=True
+    ).clip(min=1e-4)
+
+
+def standardize_fields(samples: SampleBatchType, fields: List[str]) -> SampleBatchType:
+    """Standardize fields of the given SampleBatch"""
+    _check_sample_batch_type(samples)
+    wrapped = False
+
+    if isinstance(samples, SampleBatch):
+        samples = samples.as_multi_agent()
+        wrapped = True
+
+    for policy_id in samples.policy_batches:
+        batch = samples.policy_batches[policy_id]
+        for field in fields:
+            if field in batch:
+                batch[field] = standardized(batch[field])
+
+    if wrapped:
+        samples = samples.policy_batches[DEFAULT_POLICY_ID]
+
+    return samples
 
 
 def compute_gae_for_sample_batch(
@@ -404,3 +461,75 @@ class MultiPPOTrainer(PPOTrainer, ABC):
     @override(PPOTrainer)
     def get_default_policy_class(self, config):
         return MultiPPOTorchPolicy
+
+    @override(PPOTrainer)
+    def training_step(self) -> ResultDict:
+        # Collect SampleBatches from sample workers until we have a full batch.
+        if self._by_agent_steps:
+            assert False
+            train_batch = synchronous_parallel_sample(
+                worker_set=self.workers, max_agent_steps=self.config["train_batch_size"]
+            )
+        else:
+            train_batch = synchronous_parallel_sample(
+                worker_set=self.workers, max_env_steps=self.config["train_batch_size"]
+            )
+        train_batch = train_batch.as_multi_agent()
+        self._counters[NUM_AGENT_STEPS_SAMPLED] += train_batch.agent_steps()
+        self._counters[NUM_ENV_STEPS_SAMPLED] += train_batch.env_steps()
+
+        # Standardize advantage
+        train_batch = standardize_fields(train_batch, ["advantages"])
+        # Train
+        if self.config["simple_optimizer"]:
+            assert False
+            train_results = train_one_step(self, train_batch)
+        else:
+            train_results = multi_gpu_train_one_step(self, train_batch)
+
+        global_vars = {
+            "timestep": self._counters[NUM_AGENT_STEPS_SAMPLED],
+        }
+
+        # Update weights - after learning on the local worker - on all remote
+        # workers.
+        if self.workers.remote_workers():
+            with self._timers[SYNCH_WORKER_WEIGHTS_TIMER]:
+                self.workers.sync_weights(global_vars=global_vars)
+
+        # For each policy: update KL scale and warn about possible issues
+        for policy_id, policy_info in train_results.items():
+            # Update KL loss with dynamic scaling
+            # for each (possibly multiagent) policy we are training
+            kl_divergence = policy_info[LEARNER_STATS_KEY].get("kl")
+            self.get_policy(policy_id).update_kl(kl_divergence)
+
+            # Warn about excessively high value function loss
+            scaled_vf_loss = (
+                self.config["vf_loss_coeff"] * policy_info[LEARNER_STATS_KEY]["vf_loss"]
+            )
+            policy_loss = policy_info[LEARNER_STATS_KEY]["policy_loss"]
+            if scaled_vf_loss > 100:
+                logger.warning(
+                    "The magnitude of your value function loss for policy: {} is "
+                    "extremely large ({}) compared to the policy loss ({}). This "
+                    "can prevent the policy from learning. Consider scaling down "
+                    "the VF loss by reducing vf_loss_coeff, or disabling "
+                    "vf_share_layers.".format(policy_id, scaled_vf_loss, policy_loss)
+                )
+            # Warn about bad clipping configs.
+            train_batch.policy_batches[policy_id].set_get_interceptor(None)
+            mean_reward = train_batch.policy_batches[policy_id]["rewards"].mean()
+            if mean_reward > self.config["vf_clip_param"]:
+                self.warned_vf_clip = True
+                logger.warning(
+                    f"The mean reward returned from the environment is {mean_reward}"
+                    f" but the vf_clip_param is set to {self.config['vf_clip_param']}."
+                    f" Consider increasing it for policy: {policy_id} to improve"
+                    " value function convergence."
+                )
+
+        # Update global vars on local worker as well.
+        self.workers.local_worker().set_global_vars(global_vars)
+
+        return train_results

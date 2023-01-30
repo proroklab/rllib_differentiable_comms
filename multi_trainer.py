@@ -49,6 +49,10 @@ from ray.rllib.utils.metrics import (
     SYNCH_WORKER_WEIGHTS_TIMER,
 )
 from ray.rllib.utils.metrics.learner_info import LEARNER_STATS_KEY
+from ray.rllib.utils.numpy import convert_to_numpy
+from ray.rllib.utils.torch_utils import (
+    apply_grad_clipping,
+)
 from ray.rllib.utils.torch_utils import (
     warn_if_infinite_kl_divergence,
     explained_variance,
@@ -435,6 +439,7 @@ class MultiPPOTorchPolicy(PPOTorchPolicy, MultiAgentValueNetworkMixin):
             self, config["entropy_coeff"], config["entropy_coeff_schedule"]
         )
         KLCoeffMixin.__init__(self, config)
+        self.grad_gnorm = 0
 
         # TODO: Don't require users to call this manually.
         self._initialize_loss_from_dummy_batch()
@@ -455,6 +460,40 @@ class MultiPPOTorchPolicy(PPOTorchPolicy, MultiAgentValueNetworkMixin):
             return compute_gae_for_sample_batch(
                 self, sample_batch, other_agent_batches, episode
             )
+
+    @override(PPOTorchPolicy)
+    def extra_grad_process(self, local_optimizer, loss):
+        grad_gnorm = apply_grad_clipping(self, local_optimizer, loss)
+        if "grad_gnorm" in grad_gnorm:
+            self.grad_gnorm = grad_gnorm["grad_gnorm"].mean()
+        return grad_gnorm
+
+    @override(TorchPolicyV2)
+    def stats_fn(self, train_batch: SampleBatch) -> Dict[str, TensorType]:
+        return convert_to_numpy(
+            {
+                "cur_kl_coeff": self.kl_coeff,
+                "cur_lr": self.cur_lr,
+                "total_loss": torch.mean(
+                    torch.stack(self.get_tower_stats("total_loss"))
+                ),
+                "policy_loss": torch.mean(
+                    torch.stack(self.get_tower_stats("mean_policy_loss"))
+                ),
+                "vf_loss": torch.mean(
+                    torch.stack(self.get_tower_stats("mean_vf_loss"))
+                ),
+                "vf_explained_var": torch.mean(
+                    torch.stack(self.get_tower_stats("vf_explained_var"))
+                ),
+                "kl": torch.mean(torch.stack(self.get_tower_stats("mean_kl_loss"))),
+                "entropy": torch.mean(
+                    torch.stack(self.get_tower_stats("mean_entropy"))
+                ),
+                "entropy_coeff": self.entropy_coeff,
+                "grad_gnorm": self.grad_gnorm,
+            }
+        )
 
 
 class MultiPPOTrainer(PPOTrainer, ABC):

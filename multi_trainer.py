@@ -81,8 +81,8 @@ def standardized(array: np.ndarray):
     Returns:
         array with zero mean and unit standard deviation.
     """
-    return (array - array.mean(axis=-1, keepdims=True)) / array.std(
-        axis=-1, keepdims=True
+    return (array - array.mean(axis=0, keepdims=True)) / array.std(
+        axis=0, keepdims=True
     ).clip(min=1e-4)
 
 

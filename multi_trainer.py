@@ -465,7 +465,7 @@ class MultiPPOTorchPolicy(PPOTorchPolicy, MultiAgentValueNetworkMixin):
     def extra_grad_process(self, local_optimizer, loss):
         grad_gnorm = apply_grad_clipping(self, local_optimizer, loss)
         if "grad_gnorm" in grad_gnorm:
-            self.grad_gnorm = grad_gnorm["grad_gnorm"].mean()
+            self.grad_gnorm = grad_gnorm["grad_gnorm"]
         return grad_gnorm
 
     @override(TorchPolicyV2)

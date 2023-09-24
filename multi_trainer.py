@@ -11,10 +11,10 @@ from typing import Dict
 from typing import List, Optional, Union
 from typing import Type
 
-import gym
+import gymnasium as gym
 import numpy as np
 import ray
-from ray.rllib.agents.ppo import PPOTrainer
+from ray.rllib.algorithms.ppo import PPO
 from ray.rllib.algorithms.algorithm import Algorithm
 from ray.rllib.algorithms.ppo import PPOTorchPolicy
 from ray.rllib.algorithms.ppo.ppo_tf_policy import validate_config
@@ -157,10 +157,10 @@ def compute_gae_for_sample_batch(
 
         # sample_batch[SampleBatch.INFOS] = list of len ROLLOUT_SIZE of which every element is
         # {'rewards': {0: -0.077463925, 1: -0.0029145998, 2: -0.08233316}} if there are 3 agents
-
+        # Note(cmarschner): rewards key missing for first entry for some reason
         samplebatch_infos_rewards = concat_samples(
             [
-                SampleBatch({str(k): [np.float32(v)] for k, v in s["rewards"].items()})
+                SampleBatch({str(k): [np.float32(v)] for k, v in s.get("rewards",  {0: 0, 1: 0, 2: 0}).items()})
                 for s in sample_batch[SampleBatch.INFOS]
                 # s = {'rewards': {0: -0.077463925, 1: -0.0029145998, 2: -0.08233316}} if there are 3 agents
             ]
@@ -172,7 +172,7 @@ def compute_gae_for_sample_batch(
     if not isinstance(policy.action_space, gym.spaces.tuple.Tuple):
         raise InvalidActionSpace("Expect tuple action space")
 
-    keys_to_overwirte = [
+    keys_to_overwrite = [
         SampleBatch.REWARDS,
         SampleBatch.VF_PREDS,
         Postprocessing.ADVANTAGES,
@@ -182,7 +182,7 @@ def compute_gae_for_sample_batch(
     original_batch = sample_batch.copy()
 
     # We prepare the sample batch to contain the agent batches
-    for k in keys_to_overwirte:
+    for k in keys_to_overwrite:
         sample_batch[k] = np.zeros((len(original_batch), n_agents), dtype=np.float32)
 
     if original_batch[SampleBatch.DONES][-1]:
@@ -223,7 +223,7 @@ def compute_gae_for_sample_batch(
             use_critic=policy.config.get("use_critic", True),
         )
 
-        for k in keys_to_overwirte:
+        for k in keys_to_overwrite:
             sample_batch[k][:, agent_index] = sample_batch_agent[k]
 
     return sample_batch
@@ -496,15 +496,15 @@ class MultiPPOTorchPolicy(PPOTorchPolicy, MultiAgentValueNetworkMixin):
         )
 
 
-class MultiPPOTrainer(PPOTrainer, ABC):
-    @override(PPOTrainer)
+class MultiPPOTrainer(PPO, ABC):
+    @override(PPO)
     def get_default_policy_class(self, config):
         return MultiPPOTorchPolicy
 
-    @override(PPOTrainer)
+    @override(PPO)
     def training_step(self) -> ResultDict:
         # Collect SampleBatches from sample workers until we have a full batch.
-        if self._by_agent_steps:
+        if self.config.count_steps_by == "agent_steps":
             assert False
             train_batch = synchronous_parallel_sample(
                 worker_set=self.workers, max_agent_steps=self.config["train_batch_size"]

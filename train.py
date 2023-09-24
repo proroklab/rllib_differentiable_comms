@@ -35,6 +35,8 @@ def train(
         # )],
         stop={"training_iteration": 30},
         config={
+            "_enable_learner_api": False,
+            "_enable_rl_module_api": False,
             "framework": "torch",
             "env": "demo_env",
             "kl_coeff": 0.0,
@@ -45,7 +47,7 @@ def train(
             "rollout_fragment_length": 1250,
             "sgd_minibatch_size": 2048,
             "num_sgd_iter": 16,
-            "num_gpus": 1,
+            "num_gpus": 0, # 1,
             "num_workers": 8,
             "num_envs_per_worker": 1,
             "lr": 5e-4,
@@ -72,7 +74,6 @@ def train(
             },
         },
     )
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

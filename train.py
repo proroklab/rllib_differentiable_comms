@@ -13,7 +13,7 @@ from multi_action_dist import TorchHomogeneousMultiActionDistribution
 
 
 def train(
-    share_observations=True, use_beta=True, action_space="discrete", goal_shift=1
+    share_observations=True, use_beta=True, action_space="discrete", goal_shift=1, num_gpus=1
 ):
     ray.init()
 
@@ -47,7 +47,7 @@ def train(
             "rollout_fragment_length": 1250,
             "sgd_minibatch_size": 2048,
             "num_sgd_iter": 16,
-            "num_gpus": 0, # 1,
+            "num_gpus": num_gpus,
             "num_workers": 8,
             "num_envs_per_worker": 1,
             "lr": 5e-4,
@@ -104,6 +104,12 @@ if __name__ == "__main__":
         choices=range(0, 2),
         help="Goal shift offset (0 means that each agent moves to its own goal, 1 to its neighbor, etc.)",
     )
+    parser.add_argument(
+        "--num_gpus",
+        type=int,
+        default=1,
+        help="GPUs to use."
+    )
 
     args = parser.parse_args()
     train(
@@ -111,4 +117,5 @@ if __name__ == "__main__":
         use_beta=not args.disable_beta,
         action_space=args.action_space,
         goal_shift=args.goal_shift,
+        num_gpus=args.num_gpus,
     )

@@ -1,7 +1,8 @@
 import numpy as np
-import gym
-from gym import spaces
-from gym.utils import seeding, EzPickle
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.utils import seeding, EzPickle
+from typing import Any, Dict, Optional, Tuple
 
 X = 1
 Y = 0
@@ -63,7 +64,7 @@ class ContinuousAgent(BaseAgent):
 
     def reset(self):
         self.pose = self.random_state.uniform((0, 0), self.world_shape)
-        self.goal = self.random_state.randint((0, 0), self.world_shape)
+        self.goal = self.random_state.integers((0, 0), self.world_shape)
         self.reached_goal = False
         return [0, 0]
 
@@ -127,11 +128,11 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
         self.random_state, seed = seeding.np_random(seed)
         return [seed]
 
-    def reset(self):
+    def reset(self, seed:Optional[int] = None, options: Dict[str, Any] = None) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         reset_actions = [agent.reset() for agent in self.agents]
         self.goal_poses = [agent.goal for agent in self.agents]
         self.timestep = 0
-        return self.step(reset_actions)[0]
+        return self.step(reset_actions)[0], {}
 
     def step(self, actions):
         self.timestep += 1
@@ -165,7 +166,7 @@ class DemoMultiAgentEnv(gym.Env, EzPickle):
         info = {"rewards": rewards}
         all_rewards = sum(rewards.values())
 
-        return obs, all_rewards, done, info
+        return obs, all_rewards, done, False, info
 
     def render(self, mode="human"):
         top_bot_margin = " " + "-" * self.cfg["world_shape"][Y] * 2 + "\n"
